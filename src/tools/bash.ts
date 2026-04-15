@@ -53,16 +53,11 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bufw\b/,
 ];
 
-/**
- * ToolResult — 工具执行结果的类型
- *
- * @property output - 命令的标准输出（成功时）或错误信息（失败时）
- * @property error - 是否发生了错误
- */
-export interface ToolResult {
-  output: string;
-  error: boolean;
-}
+import { ToolResult } from "./types.js";
+
+// 重新导出 ToolResult，保持向后兼容
+// 其他已经 import { ToolResult } from "./bash.js" 的文件不需要修改
+export type { ToolResult } from "./types.js";
 
 /**
  * isDangerousCommand — 检查命令是否危险
@@ -134,7 +129,7 @@ export function executeBash(command: string): Promise<ToolResult> {
 export const bashToolDefinition: ChatCompletionTool = {
   type: "function",
   function: {
-    name: "bash",
+    name: "run_bash",
     description:
       "Execute a bash shell command and return its output. Commands are validated for safety before execution.",
     parameters: {

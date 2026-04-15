@@ -8,6 +8,8 @@ A teaching-purpose coding agent built in TypeScript. The goal is to demonstrate 
 
 Design documents live in `doc/`.
 
+**重要：** 这是一个系列递进的教学项目。每次编写新功能模块时，必须先读取 `doc/summary.md` 了解当前项目状态。每次完成代码后，按需更新 `doc/summary.md`。
+
 ## Commands
 
 ```bash

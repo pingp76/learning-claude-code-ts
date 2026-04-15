@@ -16,7 +16,15 @@
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { bashToolDefinition, executeBash } from "./bash.js";
-import type { ToolResult } from "./bash.js";
+import {
+  runReadToolDefinition,
+  executeRead,
+  runWriteToolDefinition,
+  executeWrite,
+  runEditToolDefinition,
+  executeEdit,
+} from "./files.js";
+import type { ToolResult } from "./types.js";
 
 /**
  * ToolExecutor — 工具执行函数的类型
@@ -80,6 +88,30 @@ export function createToolRegistry(): ToolRegistry {
     // 从参数字典中取出 "command" 字段，传给 executeBash
     // ?? "" 是防御性编程：如果 command 字段缺失，使用空字符串
     execute: async (args) => executeBash(args["command"] ?? ""),
+  });
+
+  // 注册文件读取工具
+  register({
+    definition: runReadToolDefinition,
+    execute: async (args) => executeRead(args["path"] ?? ""),
+  });
+
+  // 注册文件写入工具
+  register({
+    definition: runWriteToolDefinition,
+    execute: async (args) =>
+      executeWrite(args["path"] ?? "", args["content"] ?? ""),
+  });
+
+  // 注册文件编辑工具
+  register({
+    definition: runEditToolDefinition,
+    execute: async (args) =>
+      executeEdit(
+        args["path"] ?? "",
+        args["old_string"] ?? "",
+        args["new_string"] ?? "",
+      ),
   });
 
   return {
