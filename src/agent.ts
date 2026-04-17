@@ -25,6 +25,7 @@ import type { Logger } from "./logger.js";
 import type { LLMClient } from "./llm.js";
 import type { History } from "./history.js";
 import type { ToolRegistry } from "./tools/registry.js";
+import type { TodoManager } from "./todo.js";
 
 /**
  * Agent — Agent 的接口
@@ -51,8 +52,9 @@ export function createAgent(deps: {
   history: History;
   tools: ToolRegistry;
   logger: Logger;
+  todoManager: TodoManager;
 }): Agent {
-  const { llm, history, tools, logger } = deps;
+  const { llm, history, tools, logger, todoManager } = deps;
 
   return {
     /**
@@ -79,6 +81,14 @@ export function createAgent(deps: {
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
       for (;;) {
+        // 轮次上限检测：每次迭代前检查当前 task 的轮次
+        // 如果达到上限，自动中断并返回提示信息给 LLM
+        const interruptMsg = todoManager.tickRound();
+        if (interruptMsg) {
+          // 将中断提示注入对话历史，让 LLM 在下一轮看到并自行决定如何处理
+          history.add({ role: "user", content: interruptMsg });
+        }
+
         const toolDefs = tools.getToolDefinitions();
         logger.debug(
           "Calling LLM with %d messages, %d tools",

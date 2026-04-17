@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理
 
 ## 源码结构
 
@@ -22,7 +22,9 @@ src/
 ├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ 发送前消息标准化
 ├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
 ├── history.ts          # 对话历史管理（messages 数组）
-├── agent.ts            # Agent 主循环：think → act → observe
+├── agent.ts            # Agent 主循环：think → act → observe + tickRound 轮次检测
+├── todo.ts             # TODO 管理器：session 级别任务列表（工厂函数 + 6 个工具）
+├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
 ├── index.test.ts       # 占位测试
 ├── history.test.ts     # history 模块测试
@@ -33,7 +35,7 @@ src/
     ├── bash.test.ts    # bash 工具测试
     ├── files.ts        # 文件操作工具：run_read、run_write、run_edit（限工作目录）
     ├── files.test.ts   # 文件操作工具测试
-    └── registry.ts     # 工具注册表
+    └── registry.ts     # 工具注册表（bash + files + todo 工具）
 ```
 
 ## 已实现功能
@@ -73,6 +75,18 @@ src/
   - 路径安全检查同上
 - **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数
 
+### TODO 任务管理 (`todo.ts`)
+- **纯 tool 驱动**：通过 6 个工具（run_todo_create、run_todo_update、run_todo_add、run_todo_remove、run_todo_list、run_todo_cancel）管理任务列表
+- **session 级别**：一个 session 最多一个活跃 todo list，新建时自动取消旧的
+- **状态机**：
+  - TodoList：idle → active → completed/cancelled/interrupted
+  - Task：pending → in_progress → completed/skipped/cancelled/interrupted
+- **轮次上限**：每个 task 有 roundCount 计数器，agent 循环每次迭代 +1，达到上限（默认 10）自动中断
+- **中断与恢复**：中断后 LLM 可通过 run_todo_update 恢复执行、跳过、或取消
+- **自动完成检测**：所有 task 处于终态时，list 自动变为 completed
+- **agent 集成**：agent.ts 在每次 LLM 调用前调用 `todoManager.tickRound()`，中断信息注入对话历史
+- **格式化输出**：统一格式展示任务状态（`[ ]` `[>]` `[x]` `[-]` `[_]` `[!]`）+ 统计摘要
+
 ### 基础设施
 - **配置** (config.ts)：从 .env 加载 API key、baseURL、模型名
 - **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制
@@ -108,6 +122,7 @@ src/
 | `src/normalize.test.ts` | 10 | 元数据过滤、tool_result 补全、消息合并 |
 | `src/history.test.ts` | 4 | 增删、返回副本、清空 |
 | `src/logger.test.ts` | 1 | 日志级别过滤 |
+| `src/todo.test.ts` | 33 | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程 |
 | `src/index.test.ts` | 1 | 占位 |
 
 ## 设计模式

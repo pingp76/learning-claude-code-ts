@@ -25,6 +25,7 @@ import {
   executeEdit,
 } from "./files.js";
 import type { ToolResult } from "./types.js";
+import type { TodoToolProvider } from "../todo.js";
 
 /**
  * ToolExecutor — 工具执行函数的类型
@@ -62,10 +63,14 @@ export interface ToolRegistry {
 /**
  * createToolRegistry — 创建工具注册表
  *
+ * @param todoProvider - 可选的 TodoToolProvider，提供 todo 管理工具
+ *
  * 使用 Map 存储已注册的工具，以工具名为 key，ToolEntry 为 value。
  * Map 查找是 O(1) 的，比遍历数组更高效。
  */
-export function createToolRegistry(): ToolRegistry {
+export function createToolRegistry(
+  todoProvider?: TodoToolProvider,
+): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
 
@@ -113,6 +118,14 @@ export function createToolRegistry(): ToolRegistry {
         args["new_string"] ?? "",
       ),
   });
+
+  // 注册 todo 管理工具（6 个工具）
+  // 通过 TodoToolProvider 获取定义和执行函数，与 bash/files 工具完全一致的模式
+  if (todoProvider) {
+    for (const entry of todoProvider.toolEntries) {
+      register(entry);
+    }
+  }
 
   return {
     // 返回所有工具的定义列表，用于传给 LLM API
