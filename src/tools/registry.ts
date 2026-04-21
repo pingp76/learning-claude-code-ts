@@ -26,6 +26,7 @@ import {
 } from "./files.js";
 import type { ToolResult } from "./types.js";
 import type { TodoToolProvider } from "../todo.js";
+import type { SubagentToolProvider } from "./subagent.js";
 
 /**
  * ToolExecutor — 工具执行函数的类型
@@ -70,6 +71,7 @@ export interface ToolRegistry {
  */
 export function createToolRegistry(
   todoProvider?: TodoToolProvider,
+  subagentProvider?: SubagentToolProvider,
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
@@ -123,6 +125,15 @@ export function createToolRegistry(
   // 通过 TodoToolProvider 获取定义和执行函数，与 bash/files 工具完全一致的模式
   if (todoProvider) {
     for (const entry of todoProvider.toolEntries) {
+      register(entry);
+    }
+  }
+
+  // 注册子智能体工具（1 个工具）
+  // 通过 SubagentToolProvider 获取定义和执行函数
+  // 子智能体本身的注册表中不会传入此 provider，从而防止递归
+  if (subagentProvider) {
+    for (const entry of subagentProvider.toolEntries) {
       register(entry);
     }
   }

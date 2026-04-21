@@ -31,6 +31,7 @@ import type { TodoManager } from "./todo.js";
  * Agent — Agent 的接口
  *
  * 目前只有一个方法 run()：接收用户输入，返回 Agent 的最终回复。
+ * 父智能体和子智能体都实现这个接口，区别在于依赖注入的参数不同。
  */
 export interface Agent {
   run(query: string): Promise<string>;
@@ -47,14 +48,26 @@ export interface Agent {
  *
  * @returns Agent 接口的实现
  */
+/**
+ * createAgent — 创建 Agent 实例
+ *
+ * @param deps - Agent 的依赖项（通过依赖注入传入，便于测试和替换）
+ *   - llm:         LLM 客户端，用于调用大模型
+ *   - history:     对话历史管理器，用于维护上下文
+ *   - tools:       工具注册表，用于查找和执行工具
+ *   - logger:      日志器，用于输出调试信息
+ *   - todoManager: 可选，TODO 管理器（子智能体不需要）
+ *   - maxRounds:   可选，最大循环轮数（子智能体需要此限制，防止无限循环）
+ */
 export function createAgent(deps: {
   llm: LLMClient;
   history: History;
   tools: ToolRegistry;
   logger: Logger;
-  todoManager: TodoManager;
+  todoManager?: TodoManager;
+  maxRounds?: number;
 }): Agent {
-  const { llm, history, tools, logger, todoManager } = deps;
+  const { llm, history, tools, logger, todoManager, maxRounds } = deps;
 
   return {
     /**
@@ -80,13 +93,39 @@ export function createAgent(deps: {
       history.add({ role: "user", content: query });
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
+      // roundCount 用于子智能体的硬性轮数限制（maxRounds）
+      // 父智能体不设置 maxRounds，此计数器不起作用
+      let roundCount = 0;
+
       for (;;) {
-        // 轮次上限检测：每次迭代前检查当前 task 的轮次
+        roundCount++;
+
+        // 子智能体轮数上限检测：
+        // 如果设置了 maxRounds 且已超过，强制截断并返回已有的执行摘要
+        if (maxRounds !== undefined && roundCount > maxRounds) {
+          logger.info("Reached max rounds limit (%d)", maxRounds);
+          // 从历史中找到最后一条有内容的 assistant 消息作为摘要
+          const lastAssistantMsg = [...history.getMessages()]
+            .reverse()
+            .find(
+              (m) =>
+                m.role === "assistant" && typeof m.content === "string" && m.content,
+            );
+          const summary =
+            lastAssistantMsg && typeof lastAssistantMsg.content === "string"
+              ? lastAssistantMsg.content
+              : "Task incomplete: reached maximum rounds before generating a final response.";
+          return `[Round limit reached (${maxRounds})] ${summary}`;
+        }
+
+        // 父智能体的 TODO 轮次检测（子智能体没有 todoManager，跳过）
         // 如果达到上限，自动中断并返回提示信息给 LLM
-        const interruptMsg = todoManager.tickRound();
-        if (interruptMsg) {
-          // 将中断提示注入对话历史，让 LLM 在下一轮看到并自行决定如何处理
-          history.add({ role: "user", content: interruptMsg });
+        if (todoManager) {
+          const interruptMsg = todoManager.tickRound();
+          if (interruptMsg) {
+            // 将中断提示注入对话历史，让 LLM 在下一轮看到并自行决定如何处理
+            history.add({ role: "user", content: interruptMsg });
+          }
         }
 
         const toolDefs = tools.getToolDefinitions();

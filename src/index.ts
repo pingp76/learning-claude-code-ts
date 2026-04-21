@@ -24,6 +24,7 @@ import { createHistory } from "./history.js";
 import { createToolRegistry } from "./tools/registry.js";
 import { createAgent } from "./agent.js";
 import { createTodoManager } from "./todo.js";
+import { createSubagentToolProvider } from "./tools/subagent.js";
 
 /**
  * main — 主函数
@@ -48,8 +49,19 @@ async function main() {
   // 5. 创建 todo 管理器（session 级别的任务列表）
   const todoManager = createTodoManager();
 
-  // 6. 创建工具注册表（自动注册 bash、files、todo 工具）
-  const tools = createToolRegistry(todoManager);
+  // 6. 创建子智能体工具提供者
+  //    注入 createAgent 和过滤注册表工厂，打破循环依赖
+  //    createFilteredRegistry: () => createToolRegistry()
+  //    不传任何 provider → 只注册 bash + files 四个工具，自然排除 run_subagent 和 run_todo_*
+  const subagentProvider = createSubagentToolProvider({
+    llm,
+    logger,
+    createFilteredRegistry: () => createToolRegistry(),
+    createAgentFn: createAgent,
+  });
+
+  // 7. 创建工具注册表（自动注册 bash、files、todo、subagent 工具）
+  const tools = createToolRegistry(todoManager, subagentProvider);
 
   // 7. 创建 Agent（将上面所有组件注入）
   const agent = createAgent({ llm, history, tools, logger, todoManager });
