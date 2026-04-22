@@ -9,7 +9,8 @@ A teaching-purpose coding agent built in TypeScript. The goal is to demonstrate 
 Design documents live in `doc/`.
 
 **重要：** 这是一个系列递进的教学项目。每次编写新功能模块时，必须先读取 `doc/summary.md` 了解当前项目状态。每次完成代码后，按需更新 `doc/summary.md`。
-用户可能会指示先分析和优化设计文档，此时不要开始计划和编码
+用户可能会指示先分析和优化设计文档，此时不要开始计划和编码。
+不要阅读“TODO.md”文件，因为这是未来添加的功能设想。
 
 ## Commands
 
