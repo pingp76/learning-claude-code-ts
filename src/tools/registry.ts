@@ -27,6 +27,7 @@ import {
 import type { ToolResult } from "./types.js";
 import type { TodoToolProvider } from "../todo.js";
 import type { SubagentToolProvider } from "./subagent.js";
+import type { SkillToolProvider } from "../skills.js";
 
 /**
  * ToolExecutor — 工具执行函数的类型
@@ -65,6 +66,8 @@ export interface ToolRegistry {
  * createToolRegistry — 创建工具注册表
  *
  * @param todoProvider - 可选的 TodoToolProvider，提供 todo 管理工具
+ * @param subagentProvider - 可选的 SubagentToolProvider，提供子智能体工具
+ * @param skillProvider - 可选的 SkillToolProvider，提供 run_skill 技能调用工具
  *
  * 使用 Map 存储已注册的工具，以工具名为 key，ToolEntry 为 value。
  * Map 查找是 O(1) 的，比遍历数组更高效。
@@ -72,6 +75,7 @@ export interface ToolRegistry {
 export function createToolRegistry(
   todoProvider?: TodoToolProvider,
   subagentProvider?: SubagentToolProvider,
+  skillProvider?: SkillToolProvider,
 ): ToolRegistry {
   // 工具映射表：工具名 → 工具注册项
   const tools = new Map<string, ToolEntry>();
@@ -134,6 +138,15 @@ export function createToolRegistry(
   // 子智能体本身的注册表中不会传入此 provider，从而防止递归
   if (subagentProvider) {
     for (const entry of subagentProvider.toolEntries) {
+      register(entry);
+    }
+  }
+
+  // 注册 skill 工具（1 个工具）
+  // 通过 SkillToolProvider 获取定义和执行函数
+  // 子智能体的注册表中不会传入此 provider，自然排除 skill 工具
+  if (skillProvider) {
+    for (const entry of skillProvider.toolEntries) {
       register(entry);
     }
   }

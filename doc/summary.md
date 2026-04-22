@@ -10,21 +10,23 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统
 
 ## 源码结构
 
 ```
 src/
-├── index.ts            # 入口：REPL 交互循环（readline）
+├── index.ts            # 入口：REPL 交互循环（readline）+ /skill REPL 命令
 ├── config.ts           # 从 .env 加载配置
 ├── logger.ts           # 分级日志（debug/info/warn/error）
 ├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ 发送前消息标准化
 ├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
-├── history.ts          # 对话历史管理（messages 数组）
+├── history.ts          # 对话历史管理（messages 数组 + system prompt 支持）
 ├── agent.ts            # Agent 主循环：think → act → observe + tickRound 轮次检测 + maxRounds 支持
 ├── todo.ts             # TODO 管理器：session 级别任务列表（工厂函数 + 6 个工具）
+├── skills.ts           # Skill 管理器：按需加载的 prompt 扩展（scan/invoke/remove）+ SkillToolProvider
 ├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
+├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
 ├── index.test.ts       # 占位测试
 ├── history.test.ts     # history 模块测试
@@ -37,7 +39,12 @@ src/
     ├── files.test.ts   # 文件操作工具测试
     ├── subagent.ts     # 子智能体工具：run_subagent（独立上下文，隔离执行旁支任务）
     ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
-    └── registry.ts     # 工具注册表（bash + files + todo + subagent 工具）
+    └── registry.ts     # 工具注册表（bash + files + todo + subagent + skill 工具）
+skills/
+├── code-review/
+│   └── SKILL.md        # 代码审查 skill（示例）
+└── explain-code/
+    └── SKILL.md        # 代码解释 skill（示例）
 ```
 
 ## 已实现功能
@@ -77,7 +84,7 @@ src/
   - `replaceAll` 行为：所有匹配项都会被替换
   - old_string 未找到时返回错误
   - 路径安全检查同上
-- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数
+- **注册表模式**：`ToolRegistry` 统一管理工具定义与执行函数（含 bash、files、todo、subagent、skill 五类工具）
 
 ### 子智能体 / SubAgent (`tools/subagent.ts`)
 - **工具定义**：`run_subagent`，参数 `task`（必填）+ `max_rounds`（可选，默认 20）
@@ -101,10 +108,23 @@ src/
 - **agent 集成**：agent.ts 在每次 LLM 调用前调用 `todoManager.tickRound()`，中断信息注入对话历史
 - **格式化输出**：统一格式展示任务状态（`[ ]` `[>]` `[x]` `[-]` `[_]` `[!]`）+ 统计摘要
 
+### Skill 技能系统 (`skills.ts`)
+- **按需加载的 prompt 扩展**：Skill 不是新工具或子进程，而是通过 `run_skill` 工具注入的执行指示
+- **三阶段生命周期**：发现（启动时解析 SKILL.md frontmatter）→ 注册（嵌入 run_skill description）→ 触发（LLM function call 读取 body）
+- **SKILL.md 格式**：YAML frontmatter（name + description 必填）+ Markdown body（执行指示）
+- **双保险策略**：增强 tool description（触发规则 + 示例）+ system prompt hint，帮助 weaker model 正确使用
+- **SkillManager**：scan()、listMeta()、invoke()、remove() 四个核心方法
+- **SkillToolProvider**：遵循 TodoToolProvider/SubagentToolProvider 模式，提供 run_skill 工具
+- **REPL 命令**：`/skill list`（列出）、`/skill load`（重新扫描）、`/skill remove <name>`（删除）
+- **懒加载**：启动时只解析 frontmatter（name + description），触发时才读取 body
+- **参考规范**：Anthropic 官方 Skill 系统（github.com/anthropics/skills）
+
 ### 基础设施
 - **配置** (config.ts)：从 .env 加载 API key、baseURL、模型名
 - **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制
-- **对话历史** (history.ts)：messages 数组，支持 add/getMessages/clear
+- **对话历史** (history.ts)：messages 数组，支持 add/getMessages/clear/setSystemPrompt
+  - `setSystemPrompt()`：独立存储 system prompt，`getMessages()` 时自动插入头部
+      - 不参与消息标准化（合并、补全 tool_result 等），干净分离
 
 ## 依赖
 
@@ -138,6 +158,7 @@ src/
 | `src/logger.test.ts` | 1 | 日志级别过滤 |
 | `src/todo.test.ts` | 33 | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程 |
 | `src/tools/subagent.test.ts` | 13 | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表 |
+| `src/skills.test.ts` | 25 | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量 |
 | `src/index.test.ts` | 1 | 占位 |
 
 ## 设计模式
@@ -155,3 +176,6 @@ src/
 - 流式输出（streaming response）
 - 多轮对话中的 system prompt 管理
 - 更丰富的工具集（grep、glob、web fetch 等）
+- Skill 脚本执行支持（dependencies 字段、base path 引用脚本）
+- 用户级 skill 目录（`~/.claude/skills/`）
+- 对话创建 skill（LLM 自动在 skills/ 下创建目录和 SKILL.md）

@@ -17,6 +17,8 @@
  */
 
 import * as readline from "node:readline";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createLLMClient } from "./llm.js";
@@ -25,6 +27,11 @@ import { createToolRegistry } from "./tools/registry.js";
 import { createAgent } from "./agent.js";
 import { createTodoManager } from "./todo.js";
 import { createSubagentToolProvider } from "./tools/subagent.js";
+import {
+  createSkillManager,
+  createSkillToolProvider,
+  SKILL_SYSTEM_PROMPT_HINT,
+} from "./skills.js";
 
 /**
  * main — 主函数
@@ -49,7 +56,19 @@ async function main() {
   // 5. 创建 todo 管理器（session 级别的任务列表）
   const todoManager = createTodoManager();
 
-  // 6. 创建子智能体工具提供者
+  // 6. 创建 Skill 管理器（扫描 skills/ 目录）
+  //    如果 skills/ 目录存在，解析所有 SKILL.md 的 frontmatter
+  //    如果不存在，skill 功能禁用，不影响其他功能
+  const skillsDir = resolve(process.cwd(), "skills");
+  const skillManager = createSkillManager(skillsDir);
+  if (existsSync(skillsDir)) {
+    skillManager.scan();
+    logger.info("Loaded %d skills", skillManager.listMeta().length);
+  } else {
+    logger.info("No skills/ directory found, skills disabled");
+  }
+
+  // 7. 创建子智能体工具提供者
   //    注入 createAgent 和过滤注册表工厂，打破循环依赖
   //    createFilteredRegistry: () => createToolRegistry()
   //    不传任何 provider → 只注册 bash + files 四个工具，自然排除 run_subagent 和 run_todo_*
@@ -60,10 +79,20 @@ async function main() {
     createAgentFn: createAgent,
   });
 
-  // 7. 创建工具注册表（自动注册 bash、files、todo、subagent 工具）
-  const tools = createToolRegistry(todoManager, subagentProvider);
+  // 8. 创建 skill 工具提供者
+  //    将 SkillManager 包装为 SkillToolProvider，供 registry 注册
+  const skillProvider = createSkillToolProvider(skillManager);
 
-  // 7. 创建 Agent（将上面所有组件注入）
+  // 9. 创建工具注册表（自动注册 bash、files、todo、subagent、skill 工具）
+  const tools = createToolRegistry(todoManager, subagentProvider, skillProvider);
+
+  // 10. 设置 system prompt（双保险策略 2：帮助 LLM 理解 skill）
+  //     只有当存在可用 skill 时才注入，避免无谓的上下文开销
+  if (skillManager.listMeta().length > 0) {
+    history.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT);
+  }
+
+  // 11. 创建 Agent（将上面所有组件注入）
   const agent = createAgent({ llm, history, tools, logger, todoManager });
 
   logger.info("Agent started (model: %s)", config.model);
@@ -100,6 +129,14 @@ async function main() {
         return;
       }
 
+      // /skill REPL 命令处理
+      // 这些命令不经过 LLM，直接操作 SkillManager
+      if (trimmed.startsWith("/skill")) {
+        handleSkillCommand(trimmed, skillManager, logger);
+        prompt();
+        return;
+      }
+
       try {
         // 调用 Agent 处理用户输入，等待最终回复
         const response = await agent.run(trimmed);
@@ -126,3 +163,71 @@ main().catch((err) => {
   console.error("Fatal:", err);
   process.exit(1);
 });
+
+/**
+ * handleSkillCommand — 处理 /skill REPL 命令
+ *
+ * 这些命令直接操作 SkillManager，不经过 LLM：
+ * - /skill list         显示已安装的 skill 列表
+ * - /skill load         重新扫描 skills/ 目录，刷新缓存
+ * - /skill remove <name> 删除指定 skill
+ *
+ * 已知限制：/skill load 后 run_skill 的 tool description 不会动态更新
+ * （注册时一次性生成），需要重启 agent 才能完全刷新。
+ */
+function handleSkillCommand(
+  input: string,
+  manager: ReturnType<typeof createSkillManager>,
+  logger: ReturnType<typeof createLogger>,
+): void {
+  const parts = input.trim().split(/\s+/);
+  const subcommand = parts[1];
+
+  switch (subcommand) {
+    case "list": {
+      // 列出所有已安装的 skill
+      const metas = manager.listMeta();
+      if (metas.length === 0) {
+        console.log("No skills loaded.");
+      } else {
+        console.log("Available skills:");
+        for (const m of metas) {
+          console.log(`  - ${m.name}: ${m.description}`);
+        }
+      }
+      break;
+    }
+    case "load": {
+      // 重新扫描 skills/ 目录
+      manager.scan();
+      const count = manager.listMeta().length;
+      logger.info("Re-scanned skills: %d loaded", count);
+      console.log(`Scanned skills: ${count} skill(s) loaded.`);
+      // 注意：run_skill 的 tool description 不会更新，需要重启
+      if (count > 0) {
+        console.log(
+          "Note: restart the agent to update the tool definition for LLM.",
+        );
+      }
+      break;
+    }
+    case "remove": {
+      // 删除指定的 skill
+      const skillName = parts[2];
+      if (!skillName) {
+        console.log("Usage: /skill remove <name>");
+        break;
+      }
+      const removed = manager.remove(skillName);
+      if (removed) {
+        logger.info("Skill removed: %s", skillName);
+        console.log(`Skill "${skillName}" removed.`);
+      } else {
+        console.log(`Skill "${skillName}" not found.`);
+      }
+      break;
+    }
+    default:
+      console.log("Usage: /skill <list|load|remove <name>>");
+  }
+}
