@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志
 
 ## 源码结构
 
@@ -18,13 +18,15 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 src/
 ├── index.ts            # 入口：REPL 交互循环（readline）+ /skill REPL 命令
 ├── config.ts           # 从 .env 加载配置
-├── logger.ts           # 分级日志（debug/info/warn/error）
-├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ 发送前消息标准化
+├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
+├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ 发送前消息标准化 + LLM 日志记录
+├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 logs/llm.log，超 1MB 清空重写
 ├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
 ├── history.ts          # 对话历史管理（messages 数组 + system prompt 支持）
 ├── agent.ts            # Agent 主循环：think → act → observe + tickRound 轮次检测 + maxRounds 支持
 ├── todo.ts             # TODO 管理器：session 级别任务列表（工厂函数 + 6 个工具）
 ├── skills.ts           # Skill 管理器：按需加载的 prompt 扩展（scan/invoke/remove）+ SkillToolProvider
+├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
 ├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
@@ -37,7 +39,7 @@ src/
     ├── bash.test.ts    # bash 工具测试
     ├── files.ts        # 文件操作工具：run_read、run_write、run_edit（限工作目录）
     ├── files.test.ts   # 文件操作工具测试
-    ├── subagent.ts     # 子智能体工具：run_subagent（独立上下文，隔离执行旁支任务）
+    ├── subagent.ts     # 子智能体工具：run_subagent（独立上下文 + skill 支持）
     ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
     └── registry.ts     # 工具注册表（bash + files + todo + subagent + skill 工具）
 skills/
@@ -54,7 +56,7 @@ skills/
 - 调用 LLM（传入完整 history + 工具定义）
 - 处理 LLM 响应：
   - 文本回复 → 直接返回给用户
-  - 工具调用 → 执行工具，结果存入 history，继续调用 LLM
+  - 工具调用 → 逐个执行，结果存入 history，继续调用 LLM
 - 循环直到 LLM 不再请求工具调用
 - JSON 解析失败的容错处理（将错误告知 LLM 让其自行修正）
 - **maxRounds 支持**：可选的最大循环轮数（子智能体使用），超过时强制截断并返回摘要
@@ -65,6 +67,14 @@ skills/
 - 支持 function calling（工具调用）
 - 接口抽象：`LLMClient { chat(messages, tools?) }`
 - **发送前消息标准化**：调用 `normalizeMessages()` 处理消息
+- **LLM 通信日志**：可选的 `LLMLogger` 参数，记录完整请求/响应到本地文件
+
+### LLM 通信日志 (`llm-logger.ts`)
+- **完整记录原始通信**：请求（消息列表 + 工具定义）和响应（内容 + 工具调用 + 耗时）
+- **不做任何截断**：消息内容、工具参数、tool_call arguments 全部完整保留
+- **格式化为易读结构**：角色标签对齐、JSON 美化、缩进
+- **文件策略**：固定 `logs/llm.log`，每次启动清空，超过 1MB 清空重写
+- **请求-响应成对**：每组用空行 + 分隔线隔开
 
 ### 消息标准化 (`normalize.ts`)
 - **过滤元数据字段**：清理 content 数组中 `_` 开头的键（如 `_timestamp`、`_id`）
@@ -90,9 +100,10 @@ skills/
 - **工具定义**：`run_subagent`，参数 `task`（必填）+ `max_rounds`（可选，默认 20）
 - **核心设计**：子智能体是一个独立的 Agent 实例，拥有自己的对话历史
 - **上下文隔离**：子智能体执行过程中产生的所有中间消息对父智能体不可见
-- **工具过滤**：子智能体只能使用 run_bash、run_read、run_write、run_edit
+- **工具集**：子智能体可使用 run_bash、run_read、run_write、run_edit、**run_skill**
   - 排除 run_subagent（防止无限递归）
-  - 排除 run_todo_*（防止干扰父级任务状态）
+  - 排除 run_todo_*（隔离上下文中用户看不到进度，maxRounds 已够用）
+- **skill 支持**：子智能体加载 system prompt hint，可自主调用 run_skill 获取专业指示
 - **循环依赖解决**：通过依赖注入 `createAgentFn` 打破 agent.ts ↔ registry.ts ↔ subagent.ts 的循环
 - **停止条件**：任务完成（LLM 返回文本） / 轮数上限（强制截断） / LLM 错误（返回错误信息）
 
@@ -106,7 +117,7 @@ skills/
 - **中断与恢复**：中断后 LLM 可通过 run_todo_update 恢复执行、跳过、或取消
 - **自动完成检测**：所有 task 处于终态时，list 自动变为 completed
 - **agent 集成**：agent.ts 在每次 LLM 调用前调用 `todoManager.tickRound()`，中断信息注入对话历史
-- **格式化输出**：统一格式展示任务状态（`[ ]` `[>]` `[x]` `[-]` `[_]` `[!]`）+ 统计摘要
+- **格式化输出**：统一格式展示任务状态（`[ ]` `[>]` `[x]` `[-]` `[_]` `[!]`）+ task_id + 统计摘要
 
 ### Skill 技能系统 (`skills.ts`)
 - **按需加载的 prompt 扩展**：Skill 不是新工具或子进程，而是通过 `run_skill` 工具注入的执行指示
@@ -121,10 +132,10 @@ skills/
 
 ### 基础设施
 - **配置** (config.ts)：从 .env 加载 API key、baseURL、模型名
-- **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制
+- **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制，使用 `util.format` 替换 %s/%d 占位符
 - **对话历史** (history.ts)：messages 数组，支持 add/getMessages/clear/setSystemPrompt
   - `setSystemPrompt()`：独立存储 system prompt，`getMessages()` 时自动插入头部
-      - 不参与消息标准化（合并、补全 tool_result 等），干净分离
+  - 不参与消息标准化（合并、补全 tool_result 等），干净分离
 
 ## 依赖
 

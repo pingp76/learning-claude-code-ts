@@ -1,3 +1,5 @@
+import { format } from "node:util";
+
 /**
  * logger.ts — 日志模块
  *
@@ -82,12 +84,14 @@ export function createLogger(level: string): Logger {
     if (LEVEL_ORDER[lvl] >= current) {
       const timestamp = new Date().toISOString();
       const prefix = `[${timestamp}] [${lvl.toUpperCase()}]`;
+      // 使用 util.format 替换 %s/%d/%j 等占位符，再输出完整行
+      const formatted = args.length > 0 ? format(msg, ...args) : msg;
       if (lvl === "error") {
-        console.error(prefix, msg, ...args);
+        console.error(prefix, formatted);
       } else if (lvl === "warn") {
-        console.warn(prefix, msg, ...args);
+        console.warn(prefix, formatted);
       } else {
-        console.log(prefix, msg, ...args);
+        console.log(prefix, formatted);
       }
     }
   }

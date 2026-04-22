@@ -22,6 +22,7 @@ import type { LLMClient } from "../llm.js";
 import type { Logger } from "../logger.js";
 import type { Agent } from "../agent.js";
 import { createHistory } from "../history.js";
+import { SKILL_SYSTEM_PROMPT_HINT } from "../skills.js";
 
 /**
  * subagentToolDefinition — run_subagent 工具的定义
@@ -34,9 +35,21 @@ export const subagentToolDefinition: ChatCompletionTool = {
   function: {
     name: "run_subagent",
     description:
-      "生成一个子智能体来独立处理子任务。子智能体拥有独立上下文，" +
-      "可以使用 bash、read、write、edit 工具。它返回最终结果，" +
-      "不会污染父级对话上下文。适用于搜索代码、分析文件、运行测试等旁支任务。",
+      "Delegate a task to an independent sub-agent. The sub-agent has its own " +
+      "isolated context and can use: run_bash, run_read, run_write, run_edit, " +
+      "and run_skill. It returns a final text result — intermediate steps are " +
+      "not visible in the parent conversation.\n\n" +
+      "Best practices:\n" +
+      "- The sub-agent can load skills (run_skill) on its own — no need to load " +
+      "skills in the parent before delegating. For example, delegate " +
+      "\"Review src/agent.ts for code quality issues\" and the sub-agent will " +
+      "load the code-review skill internally if needed.\n" +
+      "- Use TODO tasks to track progress at the parent level, and delegate " +
+      "the actual work to sub-agents.\n" +
+      "- IMPORTANT: Multiple tool calls in one response are executed SEQUENTIALLY, " +
+      "not in parallel. Do NOT call run_subagent twice in one response. " +
+      "Instead, call run_subagent for one task, wait for the result, then " +
+      "call run_subagent for the next task in the next response.",
     parameters: {
       type: "object",
       properties: {
@@ -128,7 +141,9 @@ export function createSubagentToolProvider(deps: {
     try {
       // 1. 创建独立的对话历史（不与父级共享引用）
       //    子智能体的所有中间消息都只存在于这个 history 中
+      //    设置 system prompt hint，帮助子智能体理解如何使用 skill
       const subHistory = createHistory();
+      subHistory.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT);
 
       // 2. 获取过滤后的工具注册表
       //    只有 bash + files 四个工具，没有 run_subagent（防递归）和 run_todo_*（防干扰）

@@ -17,6 +17,7 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import { normalizeMessages } from "./normalize.js";
+import type { LLMLogger } from "./llm-logger.js";
 
 /**
  * LLMResponse — LLM 返回结果的类型定义
@@ -67,7 +68,7 @@ export function createLLMClient(config: {
   apiKey: string;
   baseURL: string;
   model: string;
-}): LLMClient {
+}, llmLogger?: LLMLogger): LLMClient {
   // 创建 OpenAI SDK 客户端，通过 baseURL 重定向到 MiniMax 的服务器
   const client = new OpenAI({
     apiKey: config.apiKey,
@@ -80,11 +81,17 @@ export function createLLMClient(config: {
       // 过滤元数据、补全 tool_result、合并同角色消息
       const normalized = normalizeMessages(messages);
 
+      // 记录发送给 LLM 的请求（消息列表 + 工具定义）
+      llmLogger?.logRequest(normalized, tools);
+
       // 基础请求参数：模型名和标准化后的消息列表
       const baseParams = {
         model: config.model,
         messages: normalized,
       };
+
+      // 记录请求开始时间，用于计算耗时
+      const startTime = Date.now();
 
       // 调用 API：只有当 tools 不为空时才传入 tools 参数
       // 这是因为某些模型在不传 tools 时行为不同（不会尝试调用工具）
@@ -94,18 +101,26 @@ export function createLLMClient(config: {
           : baseParams,
       );
 
+      // 计算耗时
+      const durationMs = Date.now() - startTime;
+
       // 从响应中提取第一个（通常也是唯一的）选择的结果
       const choice = response.choices[0]?.message;
       if (!choice) {
         throw new Error("No response from LLM");
       }
 
-      return {
+      const result = {
         // content 可能为 null（比如模型只返回了工具调用，没有文字）
         content: choice.content ?? null,
         // tool_calls 可能为 undefined，统一转为空数组方便后续处理
         toolCalls: choice.tool_calls ?? [],
       };
+
+      // 记录从 LLM 收到的响应（内容 + 工具调用 + 耗时）
+      llmLogger?.logResponse(result, durationMs);
+
+      return result;
     },
   };
 }

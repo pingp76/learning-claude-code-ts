@@ -115,7 +115,9 @@ const todoUpdateDef: ChatCompletionTool = {
   function: {
     name: "run_todo_update",
     description:
-      "Update the status of a task. Optionally attach a note about progress.",
+      "Update the status of a task. Optionally attach a note about progress.\n" +
+      "Tip: You can return multiple tool_calls in one response. For example, " +
+      "mark task_1 as completed and task_2 as in_progress in the same response.",
     parameters: {
       type: "object",
       properties: {
@@ -243,10 +245,13 @@ const STATUS_SYMBOLS: Record<TaskStatus, string> = {
 /**
  * formatTask — 格式化单个 task 为显示字符串
  *
- * 格式：`[符号] 任务描述`，如果有 note 则追加 `(note内容)`
+ * 格式：`[符号] task_id: 任务描述`，如果有 note 则追加 `(note内容)`
+ *
+ * 重要：必须包含 task_id，否则 LLM 不知道如何引用这个 task。
+ * 之前缺少 task_id 导致 LLM 猜测 task_id 为 "0"，实际是 "task_1"。
  */
 function formatTask(task: Task): string {
-  let line = `${STATUS_SYMBOLS[task.status]} ${task.description}`;
+  let line = `${STATUS_SYMBOLS[task.status]} ${task.id}: ${task.description}`;
   if (task.note) {
     line += ` (${task.note})`;
   }

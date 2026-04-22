@@ -49,9 +49,9 @@ describe("TodoManager", () => {
 
       expect(result.error).toBe(false);
       // 验证格式化输出包含所有 task
-      expect(result.output).toContain("[ ] 分析需求");
-      expect(result.output).toContain("[ ] 设计模型");
-      expect(result.output).toContain("[ ] 实现代码");
+      expect(result.output).toContain("[ ] task_1: 分析需求");
+      expect(result.output).toContain("[ ] task_2: 设计模型");
+      expect(result.output).toContain("[ ] task_3: 实现代码");
       // 验证统计行
       expect(result.output).toContain("(0/3 completed)");
     });
@@ -72,7 +72,7 @@ describe("TodoManager", () => {
 
       expect(result.error).toBe(false);
       // 第二个 list 只有一个 task
-      expect(result.output).toContain("[ ] 任务C");
+      expect(result.output).toContain("[ ] task_3: 任务C");
       expect(result.output).toContain("(0/1 completed)");
       // 不应该包含第一个 list 的 task
       expect(result.output).not.toContain("任务A");
@@ -98,7 +98,7 @@ describe("TodoManager", () => {
       });
 
       expect(result.error).toBe(false);
-      expect(result.output).toContain("[>] 任务A");
+      expect(result.output).toContain("[>] task_1: 任务A");
     });
 
     it("应该将 task 标记为 completed", async () => {
@@ -117,7 +117,7 @@ describe("TodoManager", () => {
       });
 
       expect(result.error).toBe(false);
-      expect(result.output).toContain("[x] 任务A");
+      expect(result.output).toContain("[x] task_1: 任务A");
       // 所有 task 完成后，list 自动变为 completed
       expect(result.output).toContain("(1/1 completed)");
     });
@@ -137,7 +137,7 @@ describe("TodoManager", () => {
       });
 
       expect(result.error).toBe(false);
-      expect(result.output).toContain("[-] 任务A");
+      expect(result.output).toContain("[-] task_1: 任务A");
       expect(result.output).toContain("1 skipped");
     });
 
@@ -161,9 +161,9 @@ describe("TodoManager", () => {
 
       expect(result.error).toBe(false);
       // task_1 应该被自动中断
-      expect(result.output).toContain("[!] 任务A");
+      expect(result.output).toContain("[!] task_1: 任务A");
       // task_2 应该是 in_progress
-      expect(result.output).toContain("[>] 任务B");
+      expect(result.output).toContain("[>] task_2: 任务B");
     });
 
     it("应该支持附带 note", async () => {
@@ -277,8 +277,8 @@ describe("TodoManager", () => {
       const result = await add({ task: "新增任务" });
 
       expect(result.error).toBe(false);
-      expect(result.output).toContain("[ ] 任务A");
-      expect(result.output).toContain("[ ] 新增任务");
+      expect(result.output).toContain("[ ] task_1: 任务A");
+      expect(result.output).toContain("[ ] task_2: 新增任务");
       expect(result.output).toContain("(0/2 completed)");
     });
 
@@ -414,8 +414,8 @@ describe("TodoManager", () => {
       const result = await list({});
 
       expect(result.error).toBe(false);
-      expect(result.output).toContain("[ ] 任务A");
-      expect(result.output).toContain("[ ] 任务B");
+      expect(result.output).toContain("[ ] task_1: 任务A");
+      expect(result.output).toContain("[ ] task_2: 任务B");
       expect(result.output).toContain("(0/2 completed)");
     });
   });
@@ -440,9 +440,9 @@ describe("TodoManager", () => {
 
       expect(result.error).toBe(false);
       // 已完成的不受影响
-      expect(result.output).toContain("[x] 任务A");
+      expect(result.output).toContain("[x] task_1: 任务A");
       // 未完成的被取消
-      expect(result.output).toContain("[_] 任务B");
+      expect(result.output).toContain("[_] task_2: 任务B");
     });
 
     it("没有活跃 list 时应返回错误", async () => {
@@ -528,7 +528,7 @@ describe("TodoManager", () => {
         status: "in_progress",
       });
       expect(result.error).toBe(false);
-      expect(result.output).toContain("[>] 任务A");
+      expect(result.output).toContain("[>] task_1: 任务A");
     });
 
     it("中断消息应包含恢复选项", async () => {
@@ -613,10 +613,10 @@ describe("TodoManager", () => {
       // task_4: pending (默认)
 
       const result = await list({});
-      expect(result.output).toContain("[x] 任务A");
-      expect(result.output).toContain("[>] 任务B (进行中)");
-      expect(result.output).toContain("[-] 任务C");
-      expect(result.output).toContain("[ ] 任务D");
+      expect(result.output).toContain("[x] task_1: 任务A");
+      expect(result.output).toContain("[>] task_2: 任务B (进行中)");
+      expect(result.output).toContain("[-] task_3: 任务C");
+      expect(result.output).toContain("[ ] task_4: 任务D");
       expect(result.output).toContain("(1/4 completed, 1 skipped)");
     });
   });
@@ -666,9 +666,9 @@ describe("TodoManager", () => {
       });
 
       expect(result.error).toBe(false);
-      expect(result.output).toContain("[x] 分析需求");
-      expect(result.output).toContain("[x] 编写代码");
-      expect(result.output).toContain("[x] 测试");
+      expect(result.output).toContain("[x] task_1: 分析需求");
+      expect(result.output).toContain("[x] task_2: 编写代码");
+      expect(result.output).toContain("[x] task_3: 测试");
       expect(result.output).toContain("(3/3 completed)");
     });
 
@@ -693,7 +693,7 @@ describe("TodoManager", () => {
         status: "in_progress",
       });
       expect(resumeResult.error).toBe(false);
-      expect(resumeResult.output).toContain("[>] 任务A");
+      expect(resumeResult.output).toContain("[>] task_1: 任务A");
 
       // roundCount 应该已重置，可以继续 tick
       expect(manager.tickRound()).toBeNull(); // roundCount = 1, 1 < 2 → null

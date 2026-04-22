@@ -32,6 +32,7 @@ import {
   createSkillToolProvider,
   SKILL_SYSTEM_PROMPT_HINT,
 } from "./skills.js";
+import { createLLMLogger } from "./llm-logger.js";
 
 /**
  * main — 主函数
@@ -48,7 +49,9 @@ async function main() {
   const logger = createLogger(config.logLevel);
 
   // 3. 创建 LLM 客户端（使用 MiniMax 的 API）
-  const llm = createLLMClient(config);
+  //    同时创建 LLM 通信日志记录器，将原始请求/响应写入 logs/ 目录
+  const llmLogger = createLLMLogger();
+  const llm = createLLMClient(config, llmLogger);
 
   // 4. 创建对话历史管理器
   const history = createHistory();
@@ -68,20 +71,20 @@ async function main() {
     logger.info("No skills/ directory found, skills disabled");
   }
 
-  // 7. 创建子智能体工具提供者
+  // 7. 创建 skill 工具提供者
+  //    必须在 subagentProvider 之前创建，因为子智能体也需要 skill 工具
+  const skillProvider = createSkillToolProvider(skillManager);
+
+  // 8. 创建子智能体工具提供者
   //    注入 createAgent 和过滤注册表工厂，打破循环依赖
-  //    createFilteredRegistry: () => createToolRegistry()
-  //    不传任何 provider → 只注册 bash + files 四个工具，自然排除 run_subagent 和 run_todo_*
+  //    createFilteredRegistry 传入 skillProvider → 子智能体拥有 bash + files + skill
+  //    不传 subagentProvider（防递归）和 todoProvider（隔离上下文中用户看不到进度）
   const subagentProvider = createSubagentToolProvider({
     llm,
     logger,
-    createFilteredRegistry: () => createToolRegistry(),
+    createFilteredRegistry: () => createToolRegistry(undefined, undefined, skillProvider),
     createAgentFn: createAgent,
   });
-
-  // 8. 创建 skill 工具提供者
-  //    将 SkillManager 包装为 SkillToolProvider，供 registry 注册
-  const skillProvider = createSkillToolProvider(skillManager);
 
   // 9. 创建工具注册表（自动注册 bash、files、todo、subagent、skill 工具）
   const tools = createToolRegistry(todoManager, subagentProvider, skillProvider);
