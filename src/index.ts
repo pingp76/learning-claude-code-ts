@@ -33,6 +33,7 @@ import {
   SKILL_SYSTEM_PROMPT_HINT,
 } from "./skills.js";
 import { createLLMLogger } from "./llm-logger.js";
+import { createContextCompressor } from "./compressor.js";
 
 /**
  * main — 主函数
@@ -79,11 +80,13 @@ async function main() {
   //    注入 createAgent 和过滤注册表工厂，打破循环依赖
   //    createFilteredRegistry 传入 skillProvider → 子智能体拥有 bash + files + skill
   //    不传 subagentProvider（防递归）和 todoProvider（隔离上下文中用户看不到进度）
+  //    createCompressorFn 为子智能体创建独立的压缩器实例
   const subagentProvider = createSubagentToolProvider({
     llm,
     logger,
     createFilteredRegistry: () => createToolRegistry(undefined, undefined, skillProvider),
     createAgentFn: createAgent,
+    createCompressorFn: () => createContextCompressor(config.compression),
   });
 
   // 9. 创建工具注册表（自动注册 bash、files、todo、subagent、skill 工具）
@@ -95,8 +98,19 @@ async function main() {
     history.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT);
   }
 
-  // 11. 创建 Agent（将上面所有组件注入）
-  const agent = createAgent({ llm, history, tools, logger, todoManager });
+  // 11. 创建上下文压缩器
+  const compressor = createContextCompressor(config.compression);
+
+  // 12. 创建 Agent（将上面所有组件注入）
+  const agent = createAgent({
+    llm,
+    history,
+    tools,
+    logger,
+    todoManager,
+    compressor,
+    maxContextTokens: config.compression.maxContextTokens,
+  });
 
   logger.info("Agent started (model: %s)", config.model);
   console.log("Coding Agent REPL — type your query, or 'exit' to quit.\n");

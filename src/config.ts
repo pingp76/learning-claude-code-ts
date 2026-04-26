@@ -28,6 +28,26 @@ interface Config {
   model: string;
   /** 日志级别：debug < info < warn < error */
   logLevel: string;
+  /** 上下文压缩配置 */
+  compression: CompressionConfig;
+}
+
+/**
+ * CompressionConfig — 压缩相关配置项
+ *
+ * 所有项都有默认值，通过环境变量覆盖。
+ */
+export interface CompressionConfig {
+  /** 即时压缩的 token 阈值（超过此值存文件） */
+  thresholdToolOutput: number;
+  /** 衰减压缩的轮次阈值（超过此轮数的工具结果会被截断） */
+  decayThreshold: number;
+  /** 衰减后保留的 token 数 */
+  decayPreviewTokens: number;
+  /** 触发全量压缩的 token 阈值 */
+  maxContextTokens: number;
+  /** 全量压缩时保留的最近消息块数 */
+  compactKeepRecent: number;
 }
 
 /**
@@ -64,5 +84,12 @@ export function loadConfig(): Config {
     model: getEnv("LLM_MODEL"),
     // ?? 是空值合并运算符：只有当左边是 null 或 undefined 时才使用右边的默认值
     logLevel: process.env["LOG_LEVEL"] ?? "info",
+    compression: {
+      thresholdToolOutput: Number(process.env["COMPRESS_TOOL_OUTPUT"]) || 2000,
+      decayThreshold: Number(process.env["COMPRESS_DECAY_THRESHOLD"]) || 3,
+      decayPreviewTokens: Number(process.env["COMPRESS_DECAY_PREVIEW"]) || 100,
+      maxContextTokens: Number(process.env["COMPRESS_MAX_CONTEXT"]) || 80000,
+      compactKeepRecent: Number(process.env["COMPACT_KEEP_RECENT"]) || 4,
+    },
   };
 }

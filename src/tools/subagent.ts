@@ -21,6 +21,7 @@ import type { ToolRegistry } from "./registry.js";
 import type { LLMClient } from "../llm.js";
 import type { Logger } from "../logger.js";
 import type { Agent } from "../agent.js";
+import type { ContextCompressor } from "../compressor.js";
 import { createHistory } from "../history.js";
 import { SKILL_SYSTEM_PROMPT_HINT } from "../skills.js";
 
@@ -105,9 +106,12 @@ export function createSubagentToolProvider(deps: {
     tools: ToolRegistry;
     logger: Logger;
     maxRounds?: number;
+    compressor: ContextCompressor;
+    maxContextTokens?: number;
   }) => Agent;
+  createCompressorFn: () => ContextCompressor;
 }): SubagentToolProvider {
-  const { llm, logger, createFilteredRegistry, createAgentFn } = deps;
+  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn } = deps;
 
   /**
    * executeSubagent — 执行子智能体任务
@@ -153,12 +157,15 @@ export function createSubagentToolProvider(deps: {
       //    - 复用父级的 llm 和 logger（共享连接和配置）
       //    - 不传 todoManager（子智能体不做任务管理）
       //    - 设置 maxRounds（硬性轮数上限）
+      //    - 使用独立的压缩器实例（隔离压缩状态）
+      const subCompressor = createCompressorFn();
       const subAgent = createAgentFn({
         llm,
         history: subHistory,
         tools: subTools,
         logger,
         maxRounds,
+        compressor: subCompressor,
       });
 
       // 4. 运行子 Agent（父智能体在此阻塞等待）

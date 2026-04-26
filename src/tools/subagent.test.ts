@@ -7,6 +7,7 @@ import { createToolRegistry } from "./registry.js";
 import type { LLMClient, LLMResponse } from "../llm.js";
 import type { ToolRegistry } from "./registry.js";
 import type { ToolResult } from "./types.js";
+import { createContextCompressor } from "../compressor.js";
 
 // ============================================================
 // Mock 工具：创建可控的 LLM 客户端，用于测试不同场景
@@ -103,6 +104,7 @@ describe("createSubagentToolProvider", () => {
       createFilteredRegistry: () =>
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: vi.fn(),
+      createCompressorFn: () => createContextCompressor(),
     });
 
     expect(provider.toolEntries).toHaveLength(1);
@@ -116,6 +118,7 @@ describe("createSubagentToolProvider", () => {
       createFilteredRegistry: () =>
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: vi.fn(),
+      createCompressorFn: () => createContextCompressor(),
     }).toolEntries[0]!.execute;
 
     const result = await execute({ task: "" });
@@ -130,6 +133,7 @@ describe("createSubagentToolProvider", () => {
       createFilteredRegistry: () =>
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: vi.fn(),
+      createCompressorFn: () => createContextCompressor(),
     }).toolEntries[0]!.execute;
 
     const result = await execute({ task: "   " });
@@ -160,6 +164,7 @@ describe("createSubagentToolProvider", () => {
           run: async () => "Analysis complete: found 3 issues",
         };
       },
+      createCompressorFn: () => createContextCompressor(),
     });
 
     const result = await provider.toolEntries[0]!.execute({
@@ -183,6 +188,7 @@ describe("createSubagentToolProvider", () => {
         capturedMaxRounds = deps.maxRounds;
         return { run: async () => "done" };
       },
+      createCompressorFn: () => createContextCompressor(),
     });
 
     await provider.toolEntries[0]!.execute({
@@ -210,6 +216,7 @@ describe("createSubagentToolProvider", () => {
       createFilteredRegistry: () =>
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: createAgent,
+      createCompressorFn: () => createContextCompressor(),
     });
 
     const result = await provider.toolEntries[0]!.execute({
@@ -274,6 +281,7 @@ describe("sub-agent round limit", () => {
       logger: mockLogger,
       createFilteredRegistry: () => filteredRegistry,
       createAgentFn: createAgent,
+      createCompressorFn: () => createContextCompressor(),
     });
 
     // 设置 max_rounds = 3，子 Agent 应该在 3 轮后强制停止

@@ -10,14 +10,48 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩
 
 ## 源码结构
 
 ```
 src/
 ├── index.ts            # 入口：REPL 交互循环（readline）+ /skill REPL 命令
-├── config.ts           # 从 .env 加载配置
+├── config.ts           # 从 .env 加载配置（含压缩配置）
+├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
+├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ LLM 日志记录
+├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 logs/llm.log，超 1MB 清空重写
+├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
+├── history.ts          # 对话历史管理（messages 数组 + system prompt 支持）
+├── message-block.ts    # 消息块：压缩的原子单位，groupToBlocks/flattenToMessages + token 估算
+├── compressor.ts       # 上下文压缩器：三层压缩（衰减 + 即时 + 全量）+ 状态管理
+├── agent.ts            # Agent 主循环：think → act → observe + 压缩管道 + 轮次追踪
+├── todo.ts             # TODO 管理器：session 级别任务列表（工厂函数 + 6 个工具）
+├── skills.ts           # Skill 管理器：按需加载的 prompt 扩展（scan/invoke/remove）+ SkillToolProvider
+├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
+├── message-block.test.ts # 消息块测试（24 个测试用例）
+├── compressor.test.ts    # 压缩器测试（18 个测试用例）
+├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
+├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
+├── normalize.test.ts   # 消息标准化测试
+├── index.test.ts       # 占位测试
+├── history.test.ts     # history 模块测试
+├── logger.test.ts      # logger 模块测试
+└── tools/
+    ├── types.ts        # 共享类型：ToolResult 接口
+    ├── bash.ts         # bash 工具：执行 shell 命令 + 危险命令过滤（工具名: run_bash）
+    ├── bash.test.ts    # bash 工具测试
+    ├── files.ts        # 文件操作工具：run_read、run_write、run_edit（限工作目录）
+    ├── files.test.ts   # 文件操作工具测试
+    ├── subagent.ts     # 子智能体工具：run_subagent（独立上下文 + skill 支持 + 独立压缩器）
+    ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
+    └── registry.ts     # 工具注册表（bash + files + todo + subagent + skill 工具）
+skills/
+├── code-review/
+│   └── SKILL.md        # 代码审查 skill（示例）
+└── explain-code/
+    └── SKILL.md        # 代码解释 skill（示例）
+```
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
 ├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ 发送前消息标准化 + LLM 日志记录
 ├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 logs/llm.log，超 1MB 清空重写
@@ -53,20 +87,48 @@ skills/
 
 ### Agent 核心循环 (`agent.ts`)
 - 接收用户 query，存入 history
-- 调用 LLM（传入完整 history + 工具定义）
+- **消息处理管道**：`getMessages() → annotateWithRounds() → normalizeMessages() → groupToBlocks() → decayOldBlocks() → [compactHistory()] → flattenToMessages() → llm.chat()`
+- **轮次追踪**：agent.ts 维护 `messageRounds` 并行数组，每次 `addWithRound()` 同步记录
+- 调用 LLM（传入压缩后的消息 + 工具定义）
 - 处理 LLM 响应：
   - 文本回复 → 直接返回给用户
   - 工具调用 → 逐个执行，结果存入 history，继续调用 LLM
+- **P1 即时压缩**：run_bash 工具的大输出自动存文件，只返回 preview
+- **P0 衰减压缩**：每轮自动截断旧的工具结果
+- **P2 全量压缩**：上下文超过阈值时，将历史压缩为摘要
 - 循环直到 LLM 不再请求工具调用
 - JSON 解析失败的容错处理（将错误告知 LLM 让其自行修正）
 - **maxRounds 支持**：可选的最大循环轮数（子智能体使用），超过时强制截断并返回摘要
 - **todoManager 可选**：子智能体不传 todoManager，父智能体行为不变
+- **compressor 必需**：上下文压缩器通过依赖注入传入
+
+### 消息块 (`message-block.ts`)
+- **消息块是压缩操作的原子单位**：保证 tool_use/tool_result 配对不被拆分
+- **三种类型**：
+  - `text`：纯文本对话（user + assistant 无工具调用）
+  - `tool_use`：工具调用轮次（assistant 含 tool_calls + 所有对应的 tool 消息）
+  - `summary`：全量压缩产生的摘要消息
+- `groupToBlocks()`：将扁平消息列表分组为消息块数组
+- `flattenToMessages()`：将消息块数组还原为扁平列表（清除 `_round` 元数据）
+- `estimateTokens()`：基于字符数的 token 估算（中文×1.5，英文×0.25，取较大值）
+- `truncateToTokens()`：按 token 估算截断文本
+
+### 上下文压缩 (`compressor.ts`)
+- **三层压缩机制**（按优先级）：
+  - **P0 衰减压缩**：`decayOldBlocks()` — 超过轮次阈值的 tool_use 块，截断 tool result content
+  - **P1 即时压缩**：`compressToolResult()` — run_bash 大输出存入 `.task_outputs/`，返回 preview
+  - **P2 全量压缩**：`compactHistory()` — 纯规则压缩，保留 recent K 块，其余压缩为摘要
+- **消息块约束**：不拆分块、不孤立配对、不破坏 ID 关联
+- **状态管理**：hasCompacted、lastSummary、recentFiles（闭包保护）
+- **连续压缩**：后续压缩复用上一次 summary，避免信息退化
+- **降级策略**：文件写入失败跳过压缩、全量压缩后仍超限保留最精简上下文
+- **cleanup()**：清空 `.task_outputs/` 目录
 
 ### LLM 客户端 (`llm.ts`)
 - 使用 OpenAI SDK，通过 baseURL 接入 MiniMax API
 - 支持 function calling（工具调用）
 - 接口抽象：`LLMClient { chat(messages, tools?) }`
-- **发送前消息标准化**：调用 `normalizeMessages()` 处理消息
+- **消息由调用方标准化**：normalize 移至 agent.ts，llm.chat() 接收已处理的消息
 - **LLM 通信日志**：可选的 `LLMLogger` 参数，记录完整请求/响应到本地文件
 
 ### LLM 通信日志 (`llm-logger.ts`)
@@ -104,7 +166,8 @@ skills/
   - 排除 run_subagent（防止无限递归）
   - 排除 run_todo_*（隔离上下文中用户看不到进度，maxRounds 已够用）
 - **skill 支持**：子智能体加载 system prompt hint，可自主调用 run_skill 获取专业指示
-- **循环依赖解决**：通过依赖注入 `createAgentFn` 打破 agent.ts ↔ registry.ts ↔ subagent.ts 的循环
+- **独立压缩器**：通过 `createCompressorFn` 注入，子智能体使用独立的压缩器实例
+- **循环依赖解决**：通过依赖注入 `createAgentFn` + `createCompressorFn` 打破循环
 - **停止条件**：任务完成（LLM 返回文本） / 轮数上限（强制截断） / LLM 错误（返回错误信息）
 
 ### TODO 任务管理 (`todo.ts`)
@@ -157,6 +220,11 @@ skills/
 | `LLM_BASE_URL` | API 基础 URL | `https://api.minimaxi.com/v1` |
 | `LLM_MODEL` | 模型名称 | `MiniMax-M2.5` |
 | `LOG_LEVEL` | 日志级别 | `info` |
+| `COMPRESS_TOOL_OUTPUT` | 即时压缩 token 阈值 | `2000` |
+| `COMPRESS_DECAY_THRESHOLD` | 衰减压缩轮次阈值 | `3` |
+| `COMPRESS_DECAY_PREVIEW` | 衰减后保留 token 数 | `100` |
+| `COMPRESS_MAX_CONTEXT` | 全量压缩 token 阈值 | `80000` |
+| `COMPACT_KEEP_RECENT` | 全量压缩保留消息块数 | `4` |
 
 ## 测试覆盖
 
@@ -170,6 +238,8 @@ skills/
 | `src/todo.test.ts` | 33 | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程 |
 | `src/tools/subagent.test.ts` | 13 | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表 |
 | `src/skills.test.ts` | 25 | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量 |
+| `src/message-block.test.ts` | 24 | 消息块分组、还原、_round 传递与清除、round-trip 一致性、token 估算 |
+| `src/compressor.test.ts` | 18 | 衰减压缩（近期/旧/边界）、即时压缩（小/大/降级）、全量压缩（摘要/连续/状态） |
 | `src/index.test.ts` | 1 | 占位 |
 
 ## 设计模式

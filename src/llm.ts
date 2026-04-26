@@ -16,7 +16,6 @@
 
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
-import { normalizeMessages } from "./normalize.js";
 import type { LLMLogger } from "./llm-logger.js";
 
 /**
@@ -77,17 +76,16 @@ export function createLLMClient(config: {
 
   return {
     async chat(messages, tools) {
-      // 在发送前对消息进行标准化处理
-      // 过滤元数据、补全 tool_result、合并同角色消息
-      const normalized = normalizeMessages(messages);
+      // 消息已由调用方（agent.ts）完成标准化和压缩处理
+      // 这里直接使用传入的消息，不再做任何转换
 
       // 记录发送给 LLM 的请求（消息列表 + 工具定义）
-      llmLogger?.logRequest(normalized, tools);
+      llmLogger?.logRequest(messages, tools);
 
-      // 基础请求参数：模型名和标准化后的消息列表
+      // 基础请求参数：模型名和消息列表
       const baseParams = {
         model: config.model,
-        messages: normalized,
+        messages,
       };
 
       // 记录请求开始时间，用于计算耗时
