@@ -10,32 +10,37 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理
 
 ## 源码结构
 
 ```
 src/
-├── index.ts            # 入口：REPL 交互循环（readline）+ /skill REPL 命令
+├── index.ts            # 组装根（Composition Root）：组件初始化和接线
+├── repl.ts             # REPL 交互层：readline 循环 + Agent/命令分发
+├── cli-commands.ts     # CLI 命令注册与分发（/skill、/mode 等斜杠命令）
 ├── config.ts           # 从 .env 加载配置（含压缩配置）
 ├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
 ├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ LLM 日志记录
 ├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 logs/llm.log，超 1MB 清空重写
 ├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
-├── history.ts          # 对话历史管理（messages 数组 + system prompt 支持）
+├── history.ts          # 对话历史管理（messages + rounds 统一存储 + HistoryEntry + system prompt 支持）
 ├── message-block.ts    # 消息块：压缩的原子单位，groupToBlocks/flattenToMessages + token 估算
-├── compressor.ts       # 上下文压缩器：三层压缩（衰减 + 即时 + 全量）+ 状态管理
-├── agent.ts            # Agent 主循环：think → act → observe + 压缩管道 + 轮次追踪
+├── compressor.ts       # 上下文压缩器：三层压缩（衰减 + 即时 + 全量）+ compressibleTools 配置
+├── agent.ts            # Agent 主循环：think → act → observe + 内部步骤函数 + 权限检查拦截
 ├── todo.ts             # TODO 管理器：session 级别任务列表（工厂函数 + 6 个工具）
 ├── skills.ts           # Skill 管理器：按需加载的 prompt 扩展（scan/invoke/remove）+ SkillToolProvider
+├── permission.ts       # 权限管理器：三种模式（plan/auto/default）+ 黑白名单 + 路径边界 + ask 降级
+├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
 ├── message-block.test.ts # 消息块测试（24 个测试用例）
-├── compressor.test.ts    # 压缩器测试（18 个测试用例）
+├── compressor.test.ts    # 压缩器测试（21 个测试用例）
+├── permission.test.ts   # 权限管理器测试（39 个测试用例）
 ├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
 ├── index.test.ts       # 占位测试
-├── history.test.ts     # history 模块测试
+├── history.test.ts     # history 模块测试（13 个测试用例）
 ├── logger.test.ts      # logger 模块测试
 └── tools/
     ├── types.ts        # 共享类型：ToolResult 接口
@@ -52,51 +57,22 @@ skills/
 └── explain-code/
     └── SKILL.md        # 代码解释 skill（示例）
 ```
-├── logger.ts           # 分级日志（debug/info/warn/error）+ util.format 占位符替换
-├── llm.ts              # LLM 客户端（OpenAI SDK + MiniMax baseURL）+ 发送前消息标准化 + LLM 日志记录
-├── llm-logger.ts       # LLM 通信日志：完整记录请求/响应到 logs/llm.log，超 1MB 清空重写
-├── normalize.ts        # 消息标准化：过滤元数据、补全 tool_result、合并同角色消息
-├── history.ts          # 对话历史管理（messages 数组 + system prompt 支持）
-├── agent.ts            # Agent 主循环：think → act → observe + tickRound 轮次检测 + maxRounds 支持
-├── todo.ts             # TODO 管理器：session 级别任务列表（工厂函数 + 6 个工具）
-├── skills.ts           # Skill 管理器：按需加载的 prompt 扩展（scan/invoke/remove）+ SkillToolProvider
-├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
-├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
-├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
-├── normalize.test.ts   # 消息标准化测试
-├── index.test.ts       # 占位测试
-├── history.test.ts     # history 模块测试
-├── logger.test.ts      # logger 模块测试
-└── tools/
-    ├── types.ts        # 共享类型：ToolResult 接口
-    ├── bash.ts         # bash 工具：执行 shell 命令 + 危险命令过滤（工具名: run_bash）
-    ├── bash.test.ts    # bash 工具测试
-    ├── files.ts        # 文件操作工具：run_read、run_write、run_edit（限工作目录）
-    ├── files.test.ts   # 文件操作工具测试
-    ├── subagent.ts     # 子智能体工具：run_subagent（独立上下文 + skill 支持）
-    ├── subagent.test.ts # 子智能体工具测试（13 个测试用例）
-    └── registry.ts     # 工具注册表（bash + files + todo + subagent + skill 工具）
-skills/
-├── code-review/
-│   └── SKILL.md        # 代码审查 skill（示例）
-└── explain-code/
-    └── SKILL.md        # 代码解释 skill（示例）
-```
 
 ## 已实现功能
 
 ### Agent 核心循环 (`agent.ts`)
 - 接收用户 query，存入 history
-- **消息处理管道**：`getMessages() → annotateWithRounds() → normalizeMessages() → groupToBlocks() → decayOldBlocks() → [compactHistory()] → flattenToMessages() → llm.chat()`
-- **轮次追踪**：agent.ts 维护 `messageRounds` 并行数组，每次 `addWithRound()` 同步记录
-- 调用 LLM（传入压缩后的消息 + 工具定义）
-- 处理 LLM 响应：
-  - 文本回复 → 直接返回给用户
-  - 工具调用 → 逐个执行，结果存入 history，继续调用 LLM
+- **主循环骨架**（六步）：轮次上限检测 → TODO 中断注入 → 消息处理管道 → 调用 LLM → 处理工具调用 → 返回最终回复
+- **内部步骤函数**（从 `run()` 提取的闭包函数，职责明确）：
+  - `appendMessage()`：向 history 添加消息（round 元信息由 history 统一管理）
+  - `annotateEntries()`：将 HistoryEntry[] 转换为带 `_round` 的消息列表（替代原 annotateWithRounds）
+  - `prepareMessages(roundCount)`：消息处理管道（getEntries → annotate → normalize → group → decay → [compact] → flatten），含降级容错
+  - `handleToolCalls(toolCalls, roundCount)`：工具调用循环（解析参数 → 执行 → P1 压缩 → 回写历史）
+  - `buildRoundLimitResponse(roundCount)`：子智能体轮次上限检测与截断响应
+- **轮次追踪**：round 元信息存储在 history 内部（`HistoryEntry`），agent 不再维护平行数组
 - **P1 即时压缩**：run_bash 工具的大输出自动存文件，只返回 preview
 - **P0 衰减压缩**：每轮自动截断旧的工具结果
 - **P2 全量压缩**：上下文超过阈值时，将历史压缩为摘要
-- 循环直到 LLM 不再请求工具调用
 - JSON 解析失败的容错处理（将错误告知 LLM 让其自行修正）
 - **maxRounds 支持**：可选的最大循环轮数（子智能体使用），超过时强制截断并返回摘要
 - **todoManager 可选**：子智能体不传 todoManager，父智能体行为不变
@@ -116,7 +92,7 @@ skills/
 ### 上下文压缩 (`compressor.ts`)
 - **三层压缩机制**（按优先级）：
   - **P0 衰减压缩**：`decayOldBlocks()` — 超过轮次阈值的 tool_use 块，截断 tool result content
-  - **P1 即时压缩**：`compressToolResult()` — run_bash 大输出存入 `.task_outputs/`，返回 preview
+  - **P1 即时压缩**：`compressToolResult(toolName, toolCallId, output)` — 压缩器内部根据 `compressibleTools` 配置列表和输出大小决策是否压缩（默认只压缩 `run_bash`），大输出存入 `.task_outputs/`，返回 preview
   - **P2 全量压缩**：`compactHistory()` — 纯规则压缩，保留 recent K 块，其余压缩为摘要
 - **消息块约束**：不拆分块、不孤立配对、不破坏 ID 关联
 - **状态管理**：hasCompacted、lastSummary、recentFiles（闭包保护）
@@ -145,6 +121,7 @@ skills/
 
 ### 工具系统 (`tools/`)
 - **命名规范**：所有工具名称以 `run_` 开头、全小写
+- **参数类型**：工具执行函数统一使用 `Record<string, unknown>`（与 LLM 返回的 JSON 类型一致）
 - **run_bash 工具**：通过 `child_process.exec` 执行 shell 命令
   - 危险命令过滤（rm -rf、mkfs、dd、fork bomb、shutdown 等）
   - 超时 30s，最大输出 1MB
@@ -193,12 +170,32 @@ skills/
 - **懒加载**：启动时只解析 frontmatter（name + description），触发时才读取 body
 - **参考规范**：Anthropic 官方 Skill 系统（github.com/anthropics/skills）
 
+### 权限管理 (`permission.ts`)
+- **三种运行模式**：
+  - `plan`：只读模式，bash 禁止，写操作仅限 `.claude/plans/`
+  - `auto`：自动模式，黑名单过滤后的操作直接放行
+  - `default`：默认模式，敏感操作（bash/write/edit/subagent）需用户确认
+- **权限检查流程**（短路返回）：工具分类 → 黑名单 → 路径边界 → 白名单 → 模式规则 → 敏感确认
+- **复用现有安全机制**：`bash.ts` 的 `isDangerousCommand()`、`files.ts` 的 `isPathSafe()`
+- **子智能体继承**：共享同一个 `PermissionManager` 实例，不传 `askUserFn`（ask 降级为 deny）
+- **`/mode` CLI 命令**：通过 `cli-commands.ts` 注册，切换运行模式
+
+### 终端封装 (`terminal.ts`)
+- **统一 readline 接口**：REPL 读取和权限确认共享同一个 `readline.Interface`
+- `question(prompt)`：用于 REPL 输入
+- `askUser(message)`：用于权限确认（接受 y/yes，其他视为拒绝）
+- `close()`：关闭 readline
+
 ### 基础设施
 - **配置** (config.ts)：从 .env 加载 API key、baseURL、模型名
 - **日志** (logger.ts)：四级日志，通过 LOG_LEVEL 控制，使用 `util.format` 替换 %s/%d 占位符
-- **对话历史** (history.ts)：messages 数组，支持 add/getMessages/clear/setSystemPrompt
+- **对话历史** (history.ts)：messages + rounds 统一存储，支持 add/getMessages/getEntries/clear/setSystemPrompt/getSystemPrompt
+  - `add(message, meta?)`：添加消息，可选附带 round 元信息（向后兼容）
+  - `getMessages()`：返回纯消息列表（含 system prompt），用于 LLM API
+  - `getEntries()`：返回带 round 元信息的条目列表（不含 system prompt），用于压缩管道
+  - `getSystemPrompt()`：返回当前 system prompt
   - `setSystemPrompt()`：独立存储 system prompt，`getMessages()` 时自动插入头部
-  - 不参与消息标准化（合并、补全 tool_result 等），干净分离
+  - round 元信息封装在闭包内，不可能失同步
 
 ## 依赖
 
@@ -233,13 +230,14 @@ skills/
 | `src/tools/bash.test.ts` | 9 | 危险命令拦截、正常执行、错误处理 |
 | `src/tools/files.test.ts` | 17 | 路径安全检查、读写文件、编辑替换 |
 | `src/normalize.test.ts` | 10 | 元数据过滤、tool_result 补全、消息合并 |
-| `src/history.test.ts` | 4 | 增删、返回副本、清空 |
+| `src/history.test.ts` | 13 | 增删、返回副本、清空、add 带 meta、getEntries、getSystemPrompt |
 | `src/logger.test.ts` | 1 | 日志级别过滤 |
 | `src/todo.test.ts` | 33 | 创建/更新/添加/删除/取消、轮次中断与恢复、格式化输出、完整流程 |
 | `src/tools/subagent.test.ts` | 13 | 工具定义、参数校验、成功/失败路径、max_rounds、轮数上限、过滤注册表 |
 | `src/skills.test.ts` | 25 | frontmatter 解析、目录扫描、skill 触发/删除、工具描述构建、provider、system prompt 常量 |
 | `src/message-block.test.ts` | 24 | 消息块分组、还原、_round 传递与清除、round-trip 一致性、token 估算 |
-| `src/compressor.test.ts` | 18 | 衰减压缩（近期/旧/边界）、即时压缩（小/大/降级）、全量压缩（摘要/连续/状态） |
+| `src/compressor.test.ts` | 21 | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup |
+| `src/permission.test.ts` | 39 | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承 |
 | `src/index.test.ts` | 1 | 占位 |
 
 ## 设计模式
@@ -249,6 +247,35 @@ skills/
 - **接口驱动**：LLMClient、Logger、History、ToolRegistry 均通过 interface 定义
 - **工具注册表**：新增工具只需 register()，无需修改 agent 代码
 - **命名规范**：所有工具名以 `run_` 前缀、全小写
+- **元信息内聚**：round 等消息元信息由 history 统一管理，消除外部平行数组
+- **统一门卫模式**：权限层在 Agent 循环中、工具执行前统一拦截，复用工具内部的安全检查函数
+- **权限继承**：子智能体共享父级 PermissionManager 实例，ask 决策因无回调降级为 deny
+- **终端共享**：REPL 和权限确认通过 Terminal 共享同一个 readline 实例，避免 stdin 冲突
+
+## 重构经验
+
+以下是重构过程中积累的经验，供后续生成代码时参考：
+
+### 平行数组是隐式耦合的高风险点
+当两个数组必须一一对应（如 messages 和 messageRounds），任何绕过同步函数的直接操作都会破坏对齐。解决方案：将元信息封装到统一存储中（如 history 内部的 rounds 数组），只暴露单一写入路径（`add()`），从接口层面消除失同步可能。
+
+### 向后兼容的接口扩展
+扩展接口时，新参数用可选类型（`meta?: { round?: number }`）。这样所有现有调用无需修改，新功能按需启用。`exactOptionalPropertyTypes` 严格模式下，返回的对象不能包含值为 undefined 的可选字段，需要条件赋值。
+
+### 压缩管道的注释解耦
+`prepareMessages()` 通过 `_round` 元数据与 `message-block.ts` 的 `groupToBlocks()` 通信。这个"协议"是松耦合的：`_round` 作为临时元数据，在 `flattenToMessages()` 中被清除，不会发送给 LLM API。只要 `_round` 的注入格式不变，下游模块（normalize、groupToBlocks、compressor）无需任何修改。
+
+### getEntries() 不含 system prompt 的设计
+`getEntries()` 有意不返回 system prompt 条目，而是通过独立的 `getSystemPrompt()` 方法获取。这样设计是因为 system prompt 不参与压缩管道，调用方可按需组装。这避免了 `annotateWithRounds()` 之前的索引偏移计算。
+
+### Record<string, unknown> 的类型转换策略
+将 `ToolExecutor` 从 `Record<string, string>` 升级为 `Record<string, unknown>` 时，所有工具实现需要用 `String()`/`Number()` 显式转换。`String(x ?? "")` 比 `x as string` 更安全，因为它处理了 `undefined`/`null`/`number` 等情况。对于数组参数（如 `args["tasks"]`），`as string[]` 断言是合理的，因为 JSON.parse 已经保证了类型。
+
+### 压缩器统一决策 vs Agent 硬编码
+将"哪些工具需要即时压缩"的决策权从 agent 移到 compressor，通过 `compressibleTools` 配置列表实现。这样新增大输出工具时只需修改配置，不碰 agent 代码。关键接口变更：`compressToolResult(toolName, toolCallId, output)` 新增 `toolName` 参数。
+
+### 组装根、应用服务、适配层的分离
+将 `index.ts` 拆成三层：`index.ts`（组装根 — 只做组件创建和接线）、`repl.ts`（应用服务 — REPL 交互循环）、`cli-commands.ts`（适配层 — CLI 斜杠命令注册和分发）。命令注册表模式让新命令只需 `register()`，不修改 REPL 代码。
 
 ## 待实现 / 未来方向
 

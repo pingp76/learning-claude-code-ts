@@ -35,8 +35,12 @@ import type { SkillToolProvider } from "../skills.js";
  * 每个工具都需要提供一个执行函数：
  * - 接收一个参数字典（来自 LLM 的 JSON 解析结果）
  * - 返回 Promise<ToolResult>（因为工具执行通常是异步的）
+ *
+ * 参数类型为 Record<string, unknown> 而非 Record<string, string>，
+ * 因为 LLM 返回的 JSON 经 JSON.parse 后值可以是 string、number、array。
+ * 工具实现时需用 String() / Number() 等做类型转换。
  */
-export type ToolExecutor = (args: Record<string, string>) => Promise<ToolResult>;
+export type ToolExecutor = (args: Record<string, unknown>) => Promise<ToolResult>;
 
 /**
  * ToolEntry — 工具注册项
@@ -93,25 +97,22 @@ export function createToolRegistry(
   }
 
   // 注册 bash 工具
-  // 将 bashToolDefinition（工具描述）和 executeBash（执行函数）绑定在一起
   register({
     definition: bashToolDefinition,
-    // 从参数字典中取出 "command" 字段，传给 executeBash
-    // ?? "" 是防御性编程：如果 command 字段缺失，使用空字符串
-    execute: async (args) => executeBash(args["command"] ?? ""),
+    execute: async (args) => executeBash(String(args["command"] ?? "")),
   });
 
   // 注册文件读取工具
   register({
     definition: runReadToolDefinition,
-    execute: async (args) => executeRead(args["path"] ?? ""),
+    execute: async (args) => executeRead(String(args["path"] ?? "")),
   });
 
   // 注册文件写入工具
   register({
     definition: runWriteToolDefinition,
     execute: async (args) =>
-      executeWrite(args["path"] ?? "", args["content"] ?? ""),
+      executeWrite(String(args["path"] ?? ""), String(args["content"] ?? "")),
   });
 
   // 注册文件编辑工具
@@ -119,9 +120,9 @@ export function createToolRegistry(
     definition: runEditToolDefinition,
     execute: async (args) =>
       executeEdit(
-        args["path"] ?? "",
-        args["old_string"] ?? "",
-        args["new_string"] ?? "",
+        String(args["path"] ?? ""),
+        String(args["old_string"] ?? ""),
+        String(args["new_string"] ?? ""),
       ),
   });
 

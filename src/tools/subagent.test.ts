@@ -8,6 +8,7 @@ import type { LLMClient, LLMResponse } from "../llm.js";
 import type { ToolRegistry } from "./registry.js";
 import type { ToolResult } from "./types.js";
 import { createContextCompressor } from "../compressor.js";
+import { createPermissionManager } from "../permission.js";
 
 // ============================================================
 // Mock 工具：创建可控的 LLM 客户端，用于测试不同场景
@@ -97,6 +98,10 @@ describe("subagentToolDefinition", () => {
 // ============================================================
 
 describe("createSubagentToolProvider", () => {
+  // 权限管理器：auto 模式允许所有操作，避免权限拦截干扰 subagent 测试
+  const testPermissionManager = createPermissionManager(process.cwd());
+  testPermissionManager.setMode("auto");
+
   it("returns provider with one tool entry", () => {
     const provider = createSubagentToolProvider({
       llm: createMockLLM([]),
@@ -105,6 +110,7 @@ describe("createSubagentToolProvider", () => {
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: vi.fn(),
       createCompressorFn: () => createContextCompressor(),
+      permissionManager: testPermissionManager,
     });
 
     expect(provider.toolEntries).toHaveLength(1);
@@ -119,6 +125,7 @@ describe("createSubagentToolProvider", () => {
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: vi.fn(),
       createCompressorFn: () => createContextCompressor(),
+      permissionManager: testPermissionManager,
     }).toolEntries[0]!.execute;
 
     const result = await execute({ task: "" });
@@ -134,6 +141,7 @@ describe("createSubagentToolProvider", () => {
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: vi.fn(),
       createCompressorFn: () => createContextCompressor(),
+      permissionManager: testPermissionManager,
     }).toolEntries[0]!.execute;
 
     const result = await execute({ task: "   " });
@@ -165,6 +173,7 @@ describe("createSubagentToolProvider", () => {
         };
       },
       createCompressorFn: () => createContextCompressor(),
+      permissionManager: testPermissionManager,
     });
 
     const result = await provider.toolEntries[0]!.execute({
@@ -189,6 +198,7 @@ describe("createSubagentToolProvider", () => {
         return { run: async () => "done" };
       },
       createCompressorFn: () => createContextCompressor(),
+      permissionManager: testPermissionManager,
     });
 
     await provider.toolEntries[0]!.execute({
@@ -210,6 +220,8 @@ describe("createSubagentToolProvider", () => {
     // createAgentFn 返回一个真实使用 failingLLM 的 Agent
     // 由于 agent loop 会调用 llm.chat()，它会抛错
     const { createAgent } = await import("../agent.js");
+    const permissionManager = createPermissionManager(process.cwd());
+    permissionManager.setMode("auto"); // auto 模式允许 bash，避免权限拦截干扰测试
     const provider = createSubagentToolProvider({
       llm: failingLLM,
       logger: createMockLogger(),
@@ -217,6 +229,7 @@ describe("createSubagentToolProvider", () => {
         createToolRegistry() as unknown as ToolRegistry,
       createAgentFn: createAgent,
       createCompressorFn: () => createContextCompressor(),
+      permissionManager,
     });
 
     const result = await provider.toolEntries[0]!.execute({
@@ -275,6 +288,8 @@ describe("sub-agent round limit", () => {
     const filteredRegistry = createToolRegistry() as unknown as ToolRegistry;
 
     const { createAgent } = await import("../agent.js");
+    const permissionManager = createPermissionManager(process.cwd());
+    permissionManager.setMode("auto");
 
     const provider = createSubagentToolProvider({
       llm: alwaysToolCallLLM,
@@ -282,6 +297,7 @@ describe("sub-agent round limit", () => {
       createFilteredRegistry: () => filteredRegistry,
       createAgentFn: createAgent,
       createCompressorFn: () => createContextCompressor(),
+      permissionManager,
     });
 
     // 设置 max_rounds = 3，子 Agent 应该在 3 轮后强制停止

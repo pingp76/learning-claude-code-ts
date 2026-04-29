@@ -88,37 +88,73 @@ export function createLLMClient(config: {
         messages,
       };
 
-      // 记录请求开始时间，用于计算耗时
-      const startTime = Date.now();
-
-      // 调用 API：只有当 tools 不为空时才传入 tools 参数
+      // 调用参数：只有当 tools 不为空时才传入 tools 参数
       // 这是因为某些模型在不传 tools 时行为不同（不会尝试调用工具）
-      const response = await client.chat.completions.create(
-        tools && tools.length > 0
-          ? { ...baseParams, tools }
-          : baseParams,
-      );
+      const params =
+        tools && tools.length > 0 ? { ...baseParams, tools } : baseParams;
 
-      // 计算耗时
-      const durationMs = Date.now() - startTime;
+      // 简单重试机制：API 偶尔返回空 choices（限流、瞬时故障等）
+      const maxRetries = 2;
+      let lastError: Error | undefined;
 
-      // 从响应中提取第一个（通常也是唯一的）选择的结果
-      const choice = response.choices[0]?.message;
-      if (!choice) {
-        throw new Error("No response from LLM");
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // 记录请求开始时间，用于计算耗时
+        const startTime = Date.now();
+
+        try {
+          const response = await client.chat.completions.create(params);
+          const durationMs = Date.now() - startTime;
+
+          // 从响应中提取第一个（通常也是唯一的）选择的结果
+          const choice = response.choices?.[0]?.message;
+          if (!choice) {
+            // 记录原始响应结构，帮助诊断 API 异常
+            console.warn(
+              "[llm] Empty choices in response (attempt %d/%d): %s",
+              attempt + 1,
+              maxRetries + 1,
+              JSON.stringify(response).slice(0, 500),
+            );
+            lastError = new Error(
+              `No response from LLM (empty choices, attempt ${attempt + 1}/${maxRetries + 1})`,
+            );
+            // 等待一小段时间再重试，避免紧密循环
+            if (attempt < maxRetries) {
+              await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+            }
+            continue;
+          }
+
+          const result = {
+            // content 可能为 null（比如模型只返回了工具调用，没有文字）
+            content: choice.content ?? null,
+            // tool_calls 可能为 undefined，统一转为空数组方便后续处理
+            toolCalls: choice.tool_calls ?? [],
+          };
+
+          // 记录从 LLM 收到的响应（内容 + 工具调用 + 耗时）
+          llmLogger?.logResponse(result, durationMs);
+
+          return result;
+        } catch (apiError) {
+          // SDK 抛出的 HTTP 错误（4xx/5xx），也尝试重试
+          const errMsg =
+            apiError instanceof Error ? apiError.message : String(apiError);
+          console.warn(
+            "[llm] API error (attempt %d/%d): %s",
+            attempt + 1,
+            maxRetries + 1,
+            errMsg,
+          );
+          lastError =
+            apiError instanceof Error ? apiError : new Error(errMsg);
+          if (attempt < maxRetries) {
+            await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          }
+        }
       }
 
-      const result = {
-        // content 可能为 null（比如模型只返回了工具调用，没有文字）
-        content: choice.content ?? null,
-        // tool_calls 可能为 undefined，统一转为空数组方便后续处理
-        toolCalls: choice.tool_calls ?? [],
-      };
-
-      // 记录从 LLM 收到的响应（内容 + 工具调用 + 耗时）
-      llmLogger?.logResponse(result, durationMs);
-
-      return result;
+      throw lastError ?? new Error("No response from LLM");
     },
   };
 }

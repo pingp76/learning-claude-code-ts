@@ -32,3 +32,97 @@ describe("createHistory", () => {
     expect(history.getMessages()).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// add() with meta — 轮次元信息存储
+// ---------------------------------------------------------------------------
+
+describe("add with meta", () => {
+  it("stores round metadata alongside message", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "hello" }, { round: 0 });
+    history.add({ role: "assistant", content: "hi" }, { round: 1 });
+    const entries = history.getEntries();
+    expect(entries).toHaveLength(2);
+    expect(entries[0]!.round).toBe(0);
+    expect(entries[1]!.round).toBe(1);
+  });
+
+  it("allows undefined round when no meta passed (backward compatible)", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "hello" }); // 不传 meta
+    const entries = history.getEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.round).toBeUndefined();
+  });
+
+  it("allows explicit undefined round in meta", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "hello" }, {}); // meta 存在但 round 未定义
+    const entries = history.getEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.round).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getEntries() — 带元信息的条目列表
+// ---------------------------------------------------------------------------
+
+describe("getEntries", () => {
+  it("returns empty array for new history", () => {
+    const history = createHistory();
+    expect(history.getEntries()).toEqual([]);
+  });
+
+  it("returns entries without system prompt", () => {
+    const history = createHistory();
+    history.setSystemPrompt("You are a helper");
+    history.add({ role: "user", content: "hello" }, { round: 1 });
+    const entries = history.getEntries();
+    // system prompt 不在 entries 中
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.message).toEqual({ role: "user", content: "hello" });
+    expect(entries[0]!.round).toBe(1);
+  });
+
+  it("returns a copy (mutations do not affect internal state)", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "hello" }, { round: 1 });
+    const entries = history.getEntries();
+    // 修改返回的数组不应影响内部状态
+    entries.push({ message: { role: "assistant", content: "hi" }, round: 2 });
+    expect(history.getEntries()).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getSystemPrompt()
+// ---------------------------------------------------------------------------
+
+describe("getSystemPrompt", () => {
+  it("returns null when no system prompt set", () => {
+    const history = createHistory();
+    expect(history.getSystemPrompt()).toBeNull();
+  });
+
+  it("returns the system prompt string when set", () => {
+    const history = createHistory();
+    history.setSystemPrompt("You are a helper");
+    expect(history.getSystemPrompt()).toBe("You are a helper");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// clear() — 同时清空 entries 和 rounds
+// ---------------------------------------------------------------------------
+
+describe("clear with entries", () => {
+  it("clears entries and rounds", () => {
+    const history = createHistory();
+    history.add({ role: "user", content: "hello" }, { round: 0 });
+    history.clear();
+    expect(history.getEntries()).toEqual([]);
+    expect(history.getMessages()).toEqual([]);
+  });
+});

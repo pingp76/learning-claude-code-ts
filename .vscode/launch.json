@@ -15,21 +15,6 @@
             "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/tsx",
             "program": "${workspaceFolder}/src/index.ts",
             "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "node",
-            "request": "launch",
-            "name": "Debug: E2E (Skill+TODO+SubAgent)",
-            "console": "integratedTerminal",
-            "skipFiles": [
-                "<node_internals>/**"
-            ],
-            "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/tsx",
-            "program": "${workspaceFolder}/src/debug-e2e.ts",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "LOG_LEVEL": "debug"
-            }
         }
     ]
 }

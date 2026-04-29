@@ -43,6 +43,8 @@ export interface CompressionConfig {
   maxContextTokens: number;
   /** 全量压缩时保留的最近消息块数 */
   compactKeepRecent: number;
+  /** 需要 P1 即时压缩的工具名列表（默认只压缩 run_bash） */
+  compressibleTools: string[];
 }
 
 /**
@@ -83,8 +85,15 @@ export interface CompressorState {
  * 对应设计文档 pdd6.md 中定义的三种压缩机制。
  */
 export interface ContextCompressor {
-  /** P1 即时压缩：工具执行后调用 */
-  compressToolResult(toolCallId: string, output: string): CompressedToolResult;
+  /**
+   * P1 即时压缩：工具执行后调用
+   *
+   * 内部根据工具名和输出大小自动决策是否压缩：
+   * - 工具名不在 compressibleTools 列表中 → 直接返回原文
+   * - 输出未超阈值 → 直接返回原文
+   * - 输出超阈值 → 存文件，返回 preview
+   */
+  compressToolResult(toolName: string, toolCallId: string, output: string): CompressedToolResult;
   /** P0 衰减压缩：每轮 agent loop 开始时调用 */
   decayOldBlocks(blocks: MessageBlock[], currentRound: number): MessageBlock[];
   /** P2 全量压缩：上下文超过阈值时调用 */
@@ -105,6 +114,7 @@ const DEFAULT_CONFIG: CompressionConfig = {
   decayPreviewTokens: 100,
   maxContextTokens: 80000,
   compactKeepRecent: 4,
+  compressibleTools: ["run_bash"],
 };
 
 // ---------------------------------------------------------------------------
@@ -138,7 +148,12 @@ export function createContextCompressor(
     // -----------------------------------------------------------------------
     // P1 即时压缩
     // -----------------------------------------------------------------------
-    compressToolResult(toolCallId: string, output: string): CompressedToolResult {
+    compressToolResult(toolName: string, toolCallId: string, output: string): CompressedToolResult {
+      // 工具名不在可压缩列表中，直接返回原文
+      if (!cfg.compressibleTools.includes(toolName)) {
+        return { content: output };
+      }
+
       const tokens = estimateTokens(output);
 
       // 未超阈值，直接返回原文
@@ -395,11 +410,11 @@ function extractToolCallSummaries(
     const name = tc.function.name;
     // 从参数中提取简短概要
     try {
-      const args = JSON.parse(tc.function.arguments) as Record<string, string>;
+      const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
       // 取第一个参数的值作为概要
       const firstValue = Object.values(args)[0];
-      if (firstValue) {
-        const short = truncateToTokens(firstValue, 50);
+      if (firstValue !== undefined && firstValue !== null) {
+        const short = truncateToTokens(String(firstValue), 50);
         return `${name}(${short})`;
       }
     } catch {
@@ -423,10 +438,10 @@ function extractFilePaths(
   }
   for (const tc of assistant.tool_calls) {
     try {
-      const args = JSON.parse(tc.function.arguments) as Record<string, string>;
+      const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
       // 常见的文件路径参数名
-      if (args["path"]) paths.push(args["path"]);
-      if (args["filePath"]) paths.push(args["filePath"]);
+      if (typeof args["path"] === "string") paths.push(args["path"]);
+      if (typeof args["filePath"] === "string") paths.push(args["filePath"]);
     } catch {
       // 忽略解析失败
     }

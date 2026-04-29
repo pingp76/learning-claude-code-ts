@@ -29,7 +29,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
  */
 export type MessageBlock =
   | { type: "text"; user?: ChatCompletionMessageParam; assistant: ChatCompletionMessageParam; round?: number }
-  | { type: "tool_use"; assistant: ChatCompletionMessageParam; toolResults: ChatCompletionMessageParam[]; round?: number }
+  | { type: "tool_use"; user?: ChatCompletionMessageParam; assistant: ChatCompletionMessageParam; toolResults: ChatCompletionMessageParam[]; round?: number }
   | { type: "summary"; user: ChatCompletionMessageParam; round?: number };
 
 /**
@@ -89,6 +89,9 @@ export function estimateBlockTokens(block: MessageBlock): number {
     }
     total += estimateTokens(extractContent(block.assistant));
   } else if (block.type === "tool_use") {
+    if (block.user) {
+      total += estimateTokens(extractContent(block.user));
+    }
     total += estimateTokens(extractContent(block.assistant));
     // tool_calls 的参数也计入
     if ("tool_calls" in block.assistant && Array.isArray(block.assistant.tool_calls)) {
@@ -231,7 +234,8 @@ export function groupToBlocks(
         msg.tool_calls.length > 0;
 
       if (hasToolCalls) {
-        // tool_use 块：assistant + 后续所有 tool 消息
+        // tool_use 块：[user] + assistant + 后续所有 tool 消息
+        // 如果前面有缓冲的 user 消息，一并纳入此块，避免丢失
         const toolResults: ChatCompletionMessageParam[] = [];
         i++; // 跳过 assistant
 
@@ -246,7 +250,16 @@ export function groupToBlocks(
           assistant: msg,
           toolResults,
         };
-        const r = minRound(readRound(msg), ...toolResults.map(readRound));
+        // 将缓冲的 user 消息纳入 tool_use 块
+        if (pendingUser !== undefined) {
+          block.user = pendingUser;
+          pendingUser = undefined;
+        }
+        const r = minRound(
+          block.user ? readRound(block.user) : undefined,
+          readRound(msg),
+          ...toolResults.map(readRound),
+        );
         if (r !== undefined) block.round = r;
         blocks.push(block);
       } else {
@@ -297,6 +310,9 @@ export function flattenToMessages(
       }
       result.push(stripRound(block.assistant));
     } else if (block.type === "tool_use") {
+      if (block.user) {
+        result.push(stripRound(block.user));
+      }
       result.push(stripRound(block.assistant));
       for (const tr of block.toolResults) {
         result.push(stripRound(tr));

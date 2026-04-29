@@ -87,7 +87,7 @@ export interface SkillToolProvider {
   /** run_skill 工具的定义和执行函数 */
   toolEntries: Array<{
     definition: ChatCompletionTool;
-    execute: (args: Record<string, string>) => Promise<ToolResult>;
+    execute: (args: Record<string, unknown>) => Promise<ToolResult>;
   }>;
 }
 
@@ -422,9 +422,15 @@ export function createSkillToolProvider(
   /**
    * run_skill 的工具定义
    *
-   * 使用 buildSkillToolDescription() 动态生成增强版 description。
-   * 注意：description 在创建时一次性生成，后续 skill 变更不会自动更新。
-   * 完全刷新需要重启 agent。
+   * 【静态快照语义】
+   * description 在创建时一次性生成（buildSkillToolDescription(manager.listMeta())），
+   * 后续通过 /skill load 添加或删除 skill 不会更新此 description。
+   * LLM 看到的永远是启动时的 skill 列表。
+   *
+   * 这是一个明确的设计决策（路线 A）：
+   * - 保持实现简单，不做热更新架构
+   * - 如果需要刷新 skill 列表，重启 agent 即可
+   * - /skill load 只更新本地缓存，不影响 LLM 可见范围
    */
   const skillToolDefinition: ChatCompletionTool = {
     type: "function",
@@ -453,9 +459,9 @@ export function createSkillToolProvider(
    * 将结果作为 tool_result 返回给 LLM。
    */
   async function executeSkill(
-    args: Record<string, string>,
+    args: Record<string, unknown>,
   ): Promise<ToolResult> {
-    const name = args["name"] ?? "";
+    const name = String(args["name"] ?? "");
     if (!name.trim()) {
       return { output: "Error: 'name' parameter is required.", error: true };
     }

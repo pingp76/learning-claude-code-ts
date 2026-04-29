@@ -283,82 +283,55 @@ interface SkillManager {
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/skills.ts` | **新增** | SkillManager 工厂函数 |
-| `src/tools/registry.ts` | **修改** | 注册 `run_skill` 工具，依赖注入 SkillManager |
-| `src/index.ts` | **修改** | 创建 SkillManager，处理 `/skill` REPL 命令 |
-| `src/agent.ts` | **小改** | 支持可选的 system prompt（策略 2 需要） |
-| `src/history.ts` | **小改** | 支持 setSystemPrompt()，首条消息前插入 system 角色 |
+| `src/skills.ts` | **新增** | SkillManager 工厂函数 + SkillToolProvider |
+| `src/tools/registry.ts` | **修改** | 接收 `skillProvider` 参数，注册 `run_skill` 工具 |
+| `src/cli-commands.ts` | **新增** | `/skill` CLI 命令注册与分发 |
+| `src/index.ts` | **修改** | 创建 SkillManager，注入到 ToolRegistry 和 CLI 命令 |
+| `src/history.ts` | **修改** | `setSystemPrompt()` 管理技能提示 |
 
 ### 依赖关系
 
 ```
-index.ts
-  ├── createSkillManager("skills/")     ← 新增
+index.ts（组装根）
+  ├── createSkillManager("skills/")
+  ├── createSkillToolProvider(skillManager)  ← 生成 run_skill 定义 + 执行函数
   ├── createToolRegistry(
   │     todoManager,
   │     subagentProvider,
-  │     skillManager                    ← 新增参数
+  │     skillProvider                         ← 注入 SkillToolProvider
   │   )
-  └── createAgent({
-       ...,
-       systemPrompt: "..."              ← 新增：skill 提示 + 项目级指令
-     })
+  ├── history.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT)  ← 通过 history 管理 system prompt
+  ├── createSkillCliCommand(skillManager, logger)         ← CLI 命令
+  └── createRepl({ agent, logger, commands, terminal })
 ```
 
-### agent.ts 修改要点
+### system prompt 管理方式
 
-`createAgent` 新增可选参数 `systemPrompt`：
-
-```typescript
-export function createAgent(deps: {
-  llm: LLMClient;
-  history: History;
-  tools: ToolRegistry;
-  logger: Logger;
-  todoManager?: TodoManager;
-  maxRounds?: number;
-  systemPrompt?: string;   // ← 新增
-}): Agent
-```
-
-改动很小：在 `history.add({ role: "user", content: query })` 之前，将 system prompt 作为第一条消息插入（仅首次）：
+system prompt 通过 `history.setSystemPrompt()` 管理（不是 agent.ts 注入）：
 
 ```typescript
-// 首次调用时插入 system prompt
-if (systemPrompt && history.getMessages().length === 0) {
-  history.add({ role: "system", content: systemPrompt });
+// index.ts 中：有 skill 时才注入 system prompt
+if (skillManager.listMeta().length > 0) {
+  history.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT);
 }
 ```
 
-### history.ts 修改要点
+好处：system prompt 独立存储在 history 闭包内，不进入 messages 数组，不干扰消息标准化。
 
-新增 `setSystemPrompt()` 方法，在 `getMessages()` 返回时自动将 system prompt 插入到消息列表头部：
+### SkillToolProvider 模式
 
-```typescript
-interface History {
-  add(message: Message): void;
-  getMessages(): Message[];
-  clear(): void;
-  setSystemPrompt(prompt: string): void;  // ← 新增
-}
-```
-
-好处：system prompt 不存在 messages 数组中，不会影响消息标准化逻辑（合并、tool_result 补全等），只在 `getMessages()` 时拼接到头部。
-
-### registry.ts 修改要点
-
-`createToolRegistry` 新增可选参数 `skillProvider`（与 `todoProvider`、`subagentProvider` 模式一致）：
+与 TodoToolProvider、SubagentToolProvider 模式一致，通过 provider 接口注册：
 
 ```typescript
 interface SkillToolProvider {
-  /** run_skill 的工具定义（description 动态包含可用 skill 列表） */
-  toolDefinition: ChatCompletionTool;
-  /** run_skill 的执行函数 */
-  execute: ToolExecutor;
+  toolEntries: Array<{
+    definition: ChatCompletionTool;
+    execute: (args: Record<string, unknown>) => Promise<ToolResult>;
+  }>;
 }
 ```
 
-`run_skill` 的工具定义（动态生成 description，使用增强版格式）：
+`run_skill` 的工具定义（description 动态生成，嵌入可用 skill 列表）：
 
 ```json
 {
@@ -380,15 +353,17 @@ interface SkillToolProvider {
 }
 ```
 
-### index.ts REPL 命令
+### CLI 命令（静态快照语义）
 
-在 `prompt()` 函数中，`exit` 命令之后新增 `/skill` 命令分支：
+`/skill` 命令在 `cli-commands.ts` 中注册，不经过 LLM：
 
 ```
-/skill load           → 重新扫描 skills/ 目录，刷新缓存
+/skill load           → 重新扫描 skills/ 目录，更新本地缓存
 /skill list           → 显示已安装的 skill 列表（name + description）
 /skill remove <name>  → 删除指定 skill 目录
 ```
+
+**静态快照语义**：`run_skill` 的 tool description 是启动时的静态快照。`/skill load` 和 `/skill remove` 只影响本地缓存，不更新 LLM 可见的工具定义。要让 LLM 看到新的 skill 列表，需要重启 agent。
 
 ## frontmatter 解析
 
@@ -501,3 +476,4 @@ description: Explain code functionality in detail with Chinese comments. Use whe
 - 本版本 skill 只包含纯文本指示，不执行外部脚本
 - skill 目录下的非 SKILL.md 文件本版本不会被读取
 - 所有 skill 在单次会话中共享同一个上下文窗口
+- skill 列表在启动时静态加载，运行时 `/skill load` 只更新本地缓存，不更新 LLM 看到的工具定义

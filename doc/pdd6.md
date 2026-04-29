@@ -94,9 +94,11 @@ history.getMessages() → normalizeMessages() → groupToBlocks() → compress()
 对单次工具输出过大的情况进行即时压缩。
 
 - **触发时机**：工具执行完成后立即触发
-- **触发条件**：输出超过 `THRESHOLD_TOOL_OUTPUT`（默认 2000）token
-- **适用范围**：仅对 `run_bash` 工具的输出应用
-  - `run_read` 返回的文件内容由 LLM 判断价值，不宜截断
+- **触发条件**：输出超过 `THRESHOLD_TOOL_OUTPUT`（默认 2000）token **且** 工具名在 `compressibleTools` 列表中
+- **适用范围**：由 `compressibleTools` 配置决定（默认 `["run_bash"]`）
+  - 压缩器内部根据工具名决策，调用方（agent.ts）无需硬编码 `if (fnName === "run_bash")`
+  - `run_read` 等工具不在列表中，输出直接透传
+  - 未来加入 `run_grep` 等大输出工具时，只需修改配置
 - **存储路径**：`.task_outputs/{toolCallId}.txt`（项目内路径）
 - **文件清理**：会话结束时统一清理 `.task_outputs/` 目录
 - **返回给 LLM 的内容**：
@@ -181,6 +183,16 @@ function groupToBlocks(messages: Message[]): MessageBlock[];
 /** 将消息块数组还原为扁平消息列表 */
 function flattenToMessages(blocks: MessageBlock[]): Message[];
 
+/** 压缩配置项 */
+interface CompressionConfig {
+  thresholdToolOutput: number;    // 即时压缩的 token 阈值
+  decayThreshold: number;         // 衰减压缩的轮次阈值
+  decayPreviewTokens: number;     // 衰减后保留的 token 数
+  maxContextTokens: number;       // 触发全量压缩的 token 阈值
+  compactKeepRecent: number;      // 全量压缩时保留的最近消息块数
+  compressibleTools: string[];    // 需要 P1 即时压缩的工具名列表
+}
+
 /** 压缩后的工具结果 */
 interface CompressedToolResult {
   content: string;           // 返回给 LLM 的内容（preview 或原文）
@@ -202,8 +214,9 @@ interface CompressorState {
 
 /** 上下文压缩器接口 */
 interface ContextCompressor {
-  // 即时压缩：工具执行后调用，决定是否存文件
-  compressToolResult(toolCallId: string, output: string): CompressedToolResult;
+  // 即时压缩：工具执行后调用
+  // 内部根据 toolName 和 compressibleTools 配置自动决策是否压缩
+  compressToolResult(toolName: string, toolCallId: string, output: string): CompressedToolResult;
 
   // 衰减压缩：每轮 agent loop 开始时调用，缩短旧的工具结果
   // 输入输出都是消息块数组，保证原子性
@@ -215,19 +228,23 @@ interface ContextCompressor {
 
   // 获取当前压缩状态
   getState(): CompressorState;
+
+  // 清理临时文件
+  cleanup(): void;
 }
 ```
 
 # 与现有模块的集成点
 
-- **agent.ts**：
-  - 工具执行后调用 `compressor.compressToolResult()` 处理输出
-  - 在 `llm.chat()` 调用前依次执行衰减压缩 + 全量压缩检测
-- **history.ts**：不修改接口，压缩操作在 `history.getMessages()` 返回的副本上进行
+- **agent.ts**（重构后由 `prepareMessages()` 和 `handleToolCalls()` 调用）：
+  - `handleToolCalls()` 中对**所有**工具统一调用 `compressor.compressToolResult(fnName, toolCallId, output)`
+  - 压缩器内部根据 `compressibleTools` 配置决策是否压缩，调用方无需硬编码工具名
+  - `prepareMessages()` 中依次执行衰减压缩 + 全量压缩检测
+- **history.ts**：压缩操作在 `history.getEntries()` 返回的带 round 元信息条目上进行
 - **normalize.ts**：压缩在其后执行，不改变现有处理顺序
 - **tools/bash.ts**：工具本身不知道压缩的存在，由 agent 负责压缩
 - **子智能体**：
-  - 子智能体使用独立的 `ContextCompressor` 实例
+  - 子智能体使用独立的 `ContextCompressor` 实例（通过 `createCompressorFn` 工厂创建）
   - 子智能体返回结果给父智能体时，结果就是天然压缩的（一条文本）
   - 父智能体不需要关心子智能体内部的压缩状态
 
@@ -235,11 +252,12 @@ interface ContextCompressor {
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `THRESHOLD_TOOL_OUTPUT` | 即时压缩的 token 阈值 | 2000 |
-| `DECAY_THRESHOLD` | 衰减压缩的轮次阈值 | 3 |
-| `DECAY_PREVIEW_TOKENS` | 衰减后保留的 token 数 | 100 |
-| `MAX_CONTEXT_TOKENS` | 触发全量压缩的 token 阈值 | 模型窗口 × 80% |
-| `COMPACT_KEEP_RECENT` | 全量压缩时保留的最近消息块数 | 4 |
+| `thresholdToolOutput` | 即时压缩的 token 阈值 | 2000 |
+| `decayThreshold` | 衰减压缩的轮次阈值 | 3 |
+| `decayPreviewTokens` | 衰减后保留的 token 数 | 100 |
+| `maxContextTokens` | 触发全量压缩的 token 阈值 | 80000 |
+| `compactKeepRecent` | 全量压缩时保留的最近消息块数 | 4 |
+| `compressibleTools` | 需要即时压缩的工具名列表 | `["run_bash"]` |
 
 # 错误处理与降级
 

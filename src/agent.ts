@@ -20,19 +20,22 @@
  * - 第 2 轮：LLM 看到文件内容，决定再调用 bash 工具运行代码
  * - 第 3 轮：LLM 看到运行结果，生成最终的文字回复给用户
  *
- * 消息处理管道：
- * history.getMessages() → annotateWithRounds() → normalizeMessages()
- *   → groupToBlocks() → decayOldBlocks() → [compactHistory()]
- *   → flattenToMessages() → llm.chat()
+ * 内部步骤函数（从 run() 主循环中提取，各自职责明确）：
+ * - appendMessage(): 向 history 添加消息（round 元信息由 history 统一管理）
+ * - prepareMessages(): 消息处理管道（从 history 读取带 round 的条目 → normalize → group → decay → compact → flatten）
+ * - handleToolCalls(): 工具调用循环（解析参数 → 执行 → P1 压缩 → 回写历史）
+ * - buildRoundLimitResponse(): 子智能体轮次上限检测与截断响应
  */
 
+import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { Logger } from "./logger.js";
 import type { LLMClient } from "./llm.js";
-import type { History } from "./history.js";
+import type { History, HistoryEntry } from "./history.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { TodoManager } from "./todo.js";
 import type { ContextCompressor } from "./compressor.js";
+import type { PermissionManager, AskUserFn } from "./permission.js";
 import { normalizeMessages } from "./normalize.js";
 import {
   groupToBlocks,
@@ -76,6 +79,10 @@ export function createAgent(deps: {
   maxRounds?: number;
   compressor: ContextCompressor;
   maxContextTokens?: number;
+  /** 权限管理器（必需），在工具执行前检查权限 */
+  permissionManager: PermissionManager;
+  /** 用户确认回调（可选，子智能体不传，ask 决策降级为 deny） */
+  askUserFn?: AskUserFn;
 }): Agent {
   const {
     llm,
@@ -86,53 +93,320 @@ export function createAgent(deps: {
     maxRounds,
     compressor,
     maxContextTokens = 80000,
+    permissionManager,
+    askUserFn,
   } = deps;
 
-  // ---- 轮次追踪 ----
-  // messageRounds 与 history 内部的 messages 数组平行
-  // 每次 history.add() 后同步 push(roundCount)
-  // 用于 annotateWithRounds() 给消息标注轮次信息
-  const messageRounds: number[] = [];
+  // =====================================================================
+  // 内部步骤函数
+  //
+  // 以下函数从 run() 主循环中提取，各自封装一个明确的职责。
+  // 它们共享 createAgent 闭包中的 history、tools、compressor 等变量，
+  // 不改变外部行为。
+  //
+  // 注意：round 元信息由 history 统一管理，不再需要 agent 维护平行数组。
+  // =====================================================================
 
   /**
-   * annotateWithRounds — 给消息列表标注 _round 元数据
+   * appendMessage — 向 history 添加消息
    *
-   * history.getMessages() 返回的消息格式：
-   * [system_prompt(可选), user, assistant, tool, ...]
-   * system prompt 由 history 独立管理，不在 messageRounds 中。
-   * 所以 user/assistant/tool 消息的索引需要偏移 1（如果有 system prompt）。
+   * 封装 history.add(message, { round }) 调用。
+   * round 元信息由 history 内部统一管理，无需额外维护平行数组。
    */
-  function annotateWithRounds(
-    msgs: ChatCompletionMessageParam[],
-  ): ChatCompletionMessageParam[] {
-    const hasSP = msgs.length > 0 && msgs[0]!.role === "system";
-    const offset = hasSP ? 1 : 0;
-    return msgs.map((msg, i) => {
-      if (i < offset) return msg; // system prompt 不标注
-      const round = messageRounds[i - offset];
-      if (round === undefined) return msg;
-      // 通过 unknown 中转，给消息添加 _round 元数据
-      return { ...msg, _round: round } as unknown as ChatCompletionMessageParam;
-    });
-  }
-
-  /**
-   * addWithRound — 向 history 添加消息并同步记录轮次
-   *
-   * 封装 history.add() + messageRounds.push() 的原子操作，
-   * 确保两者始终同步。
-   */
-  function addWithRound(
+  function appendMessage(
     message: ChatCompletionMessageParam,
     round: number,
   ): void {
-    history.add(message);
-    messageRounds.push(round);
+    history.add(message, { round });
   }
+
+  /**
+   * prepareMessages — 消息处理管道
+   *
+   * 完整流程：从 history 读取带 round 的条目 → 标注 _round → normalize → group → decay → [compact] → flatten。
+   * 如果压缩过程中任何环节出错，降级使用标准化后的消息。
+   *
+   * system prompt 独立于压缩管道：在最后拼接到消息列表头部。
+   * 因为 groupToBlocks 会跳过 system 消息，放入管道会导致丢失。
+   *
+   * @param roundCount - 当前 agent loop 轮次，用于衰减压缩判断
+   * @returns 最终给 LLM 的消息列表
+   */
+  function prepareMessages(
+    roundCount: number,
+  ): ChatCompletionMessageParam[] {
+    // 从 history 获取带 round 元信息的条目（不含 system prompt）
+    const entries = history.getEntries();
+
+    // system prompt 独立于压缩管道处理：
+    // groupToBlocks 会跳过 system 消息，导致丢失。
+    // 因此在最后单独拼接到消息列表头部。
+    const systemPrompt = history.getSystemPrompt();
+    const systemMsg: ChatCompletionMessageParam | null = systemPrompt
+      ? { role: "system", content: systemPrompt } as ChatCompletionMessageParam
+      : null;
+
+    // 将 HistoryEntry[] 转换为带 _round 的消息列表（不含 system prompt）
+    const annotated = annotateEntries(entries);
+    const normalized = normalizeMessages(annotated);
+
+    try {
+      const blocks = groupToBlocks(normalized);
+
+      // P0 衰减压缩：缩短旧的工具结果
+      const decayed = compressor.decayOldBlocks(blocks, roundCount);
+
+      // P2 全量压缩：上下文超过阈值时触发
+      let finalBlocks = decayed;
+      const tokenEstimate = estimateMessagesTokens(normalized);
+      if (tokenEstimate > maxContextTokens) {
+        logger.info(
+          "Context over threshold (%d > %d), compacting...",
+          tokenEstimate,
+          maxContextTokens,
+        );
+        const compacted = compressor.compactHistory(decayed);
+        finalBlocks = compacted.blocks;
+      }
+
+      const result = flattenToMessages(finalBlocks);
+
+      // groupToBlocks → flattenToMessages 是有损转换：
+      // 当只有 user 消息（没有配对的 assistant）时，user 被缓冲为 pendingUser
+      // 但不生成 block，导致输出为空。此时回退到标准化消息。
+      if (result.length === 0 && normalized.length > 0) {
+        const fallback = [...normalized];
+        if (systemMsg) fallback.unshift(systemMsg);
+        return fallback;
+      }
+
+      if (systemMsg) result.unshift(systemMsg);
+      return result;
+    } catch (compressErr) {
+      // 压缩管道任何环节出错，降级使用标准化后的消息
+      logger.warn(
+        "Compression pipeline failed, using normalized messages: %s",
+        compressErr instanceof Error ? compressErr.message : String(compressErr),
+      );
+      const fallback = [...normalized];
+      if (systemMsg) fallback.unshift(systemMsg);
+      return fallback;
+    }
+  }
+
+  /**
+   * annotateEntries — 将 HistoryEntry[] 转换为带 _round 元数据的消息列表
+   *
+   * 替代之前的 annotateWithRounds()：
+   * - round 信息来自 history 内部，不再需要 agent 维护平行数组
+   * - system prompt 在 prepareMessages 中独立处理，不再插入此列表
+   * - 每个 entry 自带 round，无对齐风险
+   */
+  function annotateEntries(
+    entries: HistoryEntry[],
+  ): ChatCompletionMessageParam[] {
+    const result: ChatCompletionMessageParam[] = [];
+
+    // 将 entry 转换为带 _round 的消息
+    for (const entry of entries) {
+      if (entry.round !== undefined) {
+        result.push({
+          ...entry.message,
+          _round: entry.round,
+        } as unknown as ChatCompletionMessageParam);
+      } else {
+        result.push(entry.message);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * handleToolCalls — 处理 LLM 返回的工具调用
+   *
+   * 对每个 toolCall：
+   * 1. 查找执行器（找不到 → 写错误 tool_result）
+   * 2. JSON.parse 参数（失败 → 写错误 tool_result）
+   * 3. 执行工具
+   * 4. P1 即时压缩（对 run_bash 的大输出）
+   * 5. 通过 appendMessage() 回写历史
+   *
+   * @param toolCalls - LLM 返回的工具调用列表
+   * @param roundCount - 当前轮次
+   */
+  async function handleToolCalls(
+    toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[],
+    roundCount: number,
+  ): Promise<void> {
+    for (const toolCall of toolCalls) {
+      const fnName = toolCall.function.name;
+      const executor = tools.getExecutor(fnName);
+
+      if (!executor) {
+        logger.warn("Unknown tool: %s", fnName);
+        appendMessage(
+          {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: `Error: Unknown tool "${fnName}"`,
+          } as ChatCompletionMessageParam,
+          roundCount,
+        );
+        continue;
+      }
+
+      logger.info("Tool call: %s(%s)", fnName, toolCall.function.arguments);
+
+      // 解析工具参数
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(toolCall.function.arguments) as Record<
+          string,
+          unknown
+        >;
+      } catch (parseError) {
+        logger.warn(
+          "Failed to parse tool args: %s",
+          parseError instanceof Error
+            ? parseError.message
+            : String(parseError),
+        );
+        appendMessage(
+          {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: `Error: Invalid JSON in tool arguments: ${toolCall.function.arguments}`,
+          } as ChatCompletionMessageParam,
+          roundCount,
+        );
+        continue;
+      }
+
+      // 权限检查：在工具执行前拦截
+      const decision = permissionManager.check({
+        toolName: fnName,
+        args,
+      });
+
+      if (decision.action === "deny") {
+        logger.info("Permission denied: %s — %s", fnName, decision.reason);
+        appendMessage(
+          {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: `Permission denied: ${decision.reason}`,
+          } as ChatCompletionMessageParam,
+          roundCount,
+        );
+        continue;
+      }
+
+      if (decision.action === "ask") {
+        // 子智能体没有 askUserFn，ask 降级为 deny
+        if (!askUserFn) {
+          logger.info("Permission denied (no confirmation callback): %s", fnName);
+          appendMessage(
+            {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content:
+                "Permission denied: confirmation is required but unavailable.",
+            } as ChatCompletionMessageParam,
+            roundCount,
+          );
+          continue;
+        }
+
+        const approved = await askUserFn(decision.message);
+        if (!approved) {
+          logger.info("User denied: %s — %s", fnName, decision.message);
+          appendMessage(
+            {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: `User denied: ${decision.message}`,
+            } as ChatCompletionMessageParam,
+            roundCount,
+          );
+          continue;
+        }
+      }
+
+      // 执行工具
+      const result = await executor(args);
+
+      // P1 即时压缩：compressor 内部根据工具名和输出大小决定是否压缩
+      const compressed = compressor.compressToolResult(
+        fnName,
+        toolCall.id,
+        result.output,
+      );
+      const toolOutput = compressed.content;
+
+      logger.info(
+        "Tool result (%s): %s",
+        result.error ? "error" : "ok",
+        toolOutput.slice(0, 200),
+      );
+
+      // 将工具执行结果加入历史
+      appendMessage(
+        {
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: toolOutput,
+        } as ChatCompletionMessageParam,
+        roundCount,
+      );
+    }
+  }
+
+  /**
+   * buildRoundLimitResponse — 子智能体轮次上限检测
+   *
+   * 当超过 maxRounds 时，从历史中倒找最后一条 assistant 文本消息
+   * 生成截断摘要。仅子智能体使用（maxRounds 由调用方设定）。
+   *
+   * @param roundCount - 当前轮次
+   * @returns 截断响应字符串，或 null（未超限）
+   */
+  function buildRoundLimitResponse(roundCount: number): string | null {
+    if (maxRounds === undefined || roundCount <= maxRounds) {
+      return null;
+    }
+
+    logger.info("Reached max rounds limit (%d)", maxRounds);
+    const lastAssistantMsg = [...history.getMessages()]
+      .reverse()
+      .find(
+        (m) =>
+          m.role === "assistant" &&
+          typeof m.content === "string" &&
+          m.content,
+      );
+    const summary =
+      lastAssistantMsg && typeof lastAssistantMsg.content === "string"
+        ? lastAssistantMsg.content
+        : "Task incomplete: reached maximum rounds before generating a final response.";
+    return `[Round limit reached (${maxRounds})] ${summary}`;
+  }
+
+  // =====================================================================
+  // Agent 实例
+  // =====================================================================
 
   return {
     /**
      * run — 执行一次 Agent 循环
+     *
+     * 主循环骨架清晰可见六步：
+     * 1. 轮次上限检测（子智能体）
+     * 2. TODO 中断注入（父智能体）
+     * 3. 消息处理管道（prepareMessages）
+     * 4. 调用 LLM
+     * 5. 处理工具调用（handleToolCalls）
+     * 6. 返回最终回复
      *
      * @param query - 用户输入的查询文本
      * @returns Agent 的最终文字回复
@@ -141,7 +415,7 @@ export function createAgent(deps: {
       logger.info("User query: %s", query);
 
       // 将用户消息加入对话历史（轮次为 0，即用户输入轮次）
-      addWithRound({ role: "user", content: query }, 0);
+      appendMessage({ role: "user", content: query }, 0);
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
       let roundCount = 0;
@@ -149,79 +423,28 @@ export function createAgent(deps: {
       for (;;) {
         roundCount++;
 
-        // 子智能体轮数上限检测
-        if (maxRounds !== undefined && roundCount > maxRounds) {
-          logger.info("Reached max rounds limit (%d)", maxRounds);
-          const lastAssistantMsg = [...history.getMessages()]
-            .reverse()
-            .find(
-              (m) =>
-                m.role === "assistant" &&
-                typeof m.content === "string" &&
-                m.content,
-            );
-          const summary =
-            lastAssistantMsg && typeof lastAssistantMsg.content === "string"
-              ? lastAssistantMsg.content
-              : "Task incomplete: reached maximum rounds before generating a final response.";
-          return `[Round limit reached (${maxRounds})] ${summary}`;
-        }
+        // 1. 子智能体轮次上限检测
+        const limitResponse = buildRoundLimitResponse(roundCount);
+        if (limitResponse !== null) return limitResponse;
 
-        // 父智能体的 TODO 轮次检测（子智能体没有 todoManager，跳过）
+        // 2. 父智能体的 TODO 轮次检测（子智能体没有 todoManager，跳过）
         if (todoManager) {
           const interruptMsg = todoManager.tickRound();
           if (interruptMsg) {
-            addWithRound({ role: "user", content: interruptMsg }, roundCount);
+            appendMessage({ role: "user", content: interruptMsg }, roundCount);
           }
         }
 
+        // 3. 消息处理管道
+        const finalMsgs = prepareMessages(roundCount);
         const toolDefs = tools.getToolDefinitions();
         logger.debug(
           "Calling LLM with %d messages, %d tools",
-          history.getMessages().length,
+          finalMsgs.length,
           toolDefs.length,
         );
 
-        // ============================================================
-        // 消息处理管道：annotate → normalize → group → compress → flatten
-        // 如果压缩过程中出错，降级使用标准化后的消息
-        // ============================================================
-        const raw = history.getMessages();
-        const annotated = annotateWithRounds(raw);
-        const normalized = normalizeMessages(annotated);
-        let finalMsgs: ChatCompletionMessageParam[];
-
-        try {
-          const blocks = groupToBlocks(normalized);
-
-          // P0 衰减压缩：缩短旧的工具结果
-          const decayed = compressor.decayOldBlocks(blocks, roundCount);
-
-          // P2 全量压缩：上下文超过阈值时触发
-          let finalBlocks = decayed;
-          const tokenEstimate = estimateMessagesTokens(normalized);
-          if (tokenEstimate > maxContextTokens) {
-            logger.info(
-              "Context over threshold (%d > %d), compacting...",
-              tokenEstimate,
-              maxContextTokens,
-            );
-            const compacted = compressor.compactHistory(decayed);
-            finalBlocks = compacted.blocks;
-          }
-
-          // 还原为扁平消息列表（清除 _round 元数据）
-          finalMsgs = flattenToMessages(finalBlocks);
-        } catch (compressErr) {
-          // 压缩管道任何环节出错，降级使用标准化后的消息
-          logger.warn(
-            "Compression pipeline failed, using normalized messages: %s",
-            compressErr instanceof Error ? compressErr.message : String(compressErr),
-          );
-          finalMsgs = normalized;
-        }
-
-        // 调用 LLM
+        // 4. 调用 LLM
         const response = await llm.chat(finalMsgs, toolDefs);
         logger.debug(
           "LLM response: content=%s, toolCalls=%d",
@@ -230,7 +453,7 @@ export function createAgent(deps: {
         );
 
         // 将模型的回复加入历史
-        addWithRound(
+        appendMessage(
           {
             role: "assistant",
             content: response.content ?? null,
@@ -240,86 +463,13 @@ export function createAgent(deps: {
           roundCount,
         );
 
-        // 处理工具调用
+        // 5. 处理工具调用
         if (response.toolCalls.length > 0) {
-          for (const toolCall of response.toolCalls) {
-            const fnName = toolCall.function.name;
-            const executor = tools.getExecutor(fnName);
-
-            if (!executor) {
-              logger.warn("Unknown tool: %s", fnName);
-              addWithRound(
-                {
-                  role: "tool",
-                  tool_call_id: toolCall.id,
-                  content: `Error: Unknown tool "${fnName}"`,
-                } as ChatCompletionMessageParam,
-                roundCount,
-              );
-              continue;
-            }
-
-            logger.info("Tool call: %s(%s)", fnName, toolCall.function.arguments);
-
-            // 解析工具参数
-            let args: Record<string, string>;
-            try {
-              args = JSON.parse(toolCall.function.arguments) as Record<
-                string,
-                string
-              >;
-            } catch (parseError) {
-              logger.warn(
-                "Failed to parse tool args: %s",
-                parseError instanceof Error
-                  ? parseError.message
-                  : String(parseError),
-              );
-              addWithRound(
-                {
-                  role: "tool",
-                  tool_call_id: toolCall.id,
-                  content: `Error: Invalid JSON in tool arguments: ${toolCall.function.arguments}`,
-                } as ChatCompletionMessageParam,
-                roundCount,
-              );
-              continue;
-            }
-
-            // 执行工具
-            const result = await executor(args);
-
-            // P1 即时压缩：对 run_bash 的大输出进行压缩
-            let toolOutput = result.output;
-            if (fnName === "run_bash") {
-              const compressed = compressor.compressToolResult(
-                toolCall.id,
-                result.output,
-              );
-              toolOutput = compressed.content;
-            }
-
-            logger.info(
-              "Tool result (%s): %s",
-              result.error ? "error" : "ok",
-              toolOutput.slice(0, 200),
-            );
-
-            // 将工具执行结果加入历史
-            addWithRound(
-              {
-                role: "tool",
-                tool_call_id: toolCall.id,
-                content: toolOutput,
-              } as ChatCompletionMessageParam,
-              roundCount,
-            );
-          }
-          // 继续循环
+          await handleToolCalls(response.toolCalls, roundCount);
           continue;
         }
 
-        // 没有工具调用 → 最终回复
+        // 6. 没有工具调用 → 最终回复
         if (response.content) {
           return response.content;
         }

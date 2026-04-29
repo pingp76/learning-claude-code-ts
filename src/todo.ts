@@ -334,7 +334,7 @@ export interface TodoToolProvider {
   /** 工具注册项数组：每个包含定义和执行函数 */
   toolEntries: Array<{
     definition: ChatCompletionTool;
-    execute: (args: Record<string, string>) => Promise<ToolResult>;
+    execute: (args: Record<string, unknown>) => Promise<ToolResult>;
   }>;
 }
 
@@ -646,9 +646,8 @@ export function createTodoManager(
       definition: todoCreateDef,
       // run_todo_create：解析 tasks 数组参数
       execute: async (args) => {
-        // args["tasks"] 运行时是 string[]（由 JSON.parse 产生），
-        // 但 TypeScript 类型标注为 string，需要类型断言
-        const tasks = args["tasks"] as unknown as string[] | undefined;
+        // args["tasks"] 运行时是 string[]（由 JSON.parse 产生）
+        const tasks = args["tasks"] as string[] | undefined;
         return doCreate(tasks ?? []);
       },
     },
@@ -656,18 +655,18 @@ export function createTodoManager(
       definition: todoUpdateDef,
       // run_todo_update：解析 task_id、status、可选 note
       execute: async (args) =>
-        doUpdate(args["task_id"] ?? "", args["status"] ?? "", args["note"]),
+        doUpdate(String(args["task_id"] ?? ""), String(args["status"] ?? ""), args["note"] as string | undefined),
     },
     {
       definition: todoAddDef,
       // run_todo_add：解析 task 描述、可选 after_task_id
       execute: async (args) =>
-        doAdd(args["task"] ?? "", args["after_task_id"]),
+        doAdd(String(args["task"] ?? ""), args["after_task_id"] as string | undefined),
     },
     {
       definition: todoRemoveDef,
       // run_todo_remove：解析要删除的 task_id
-      execute: async (args) => doRemove(args["task_id"] ?? ""),
+      execute: async (args) => doRemove(String(args["task_id"] ?? "")),
     },
     {
       definition: todoListDef,

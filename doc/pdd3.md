@@ -293,22 +293,30 @@ interface TodoList {
 
 ### 与 agent.ts 的集成点
 
-agent loop 中需要**一处小改动**：每次迭代时调用 `todoManager.tickRound()`。
+在 agent loop 的重构版本中，`todoManager` 通过依赖注入传入 `createAgent()`，在 `run()` 主循环中调用 `tickRound()`：
 
 ```typescript
-// agent.ts 的 for(;;) 循环中，调用 LLM 之前
-todoManager.tickRound();
-const response = await llm.chat(history.getMessages(), toolDefs);
+// agent.ts 的 run() 主循环中，调用 LLM 之前
+if (todoManager) {
+  const interruptMsg = todoManager.tickRound();
+  if (interruptMsg) {
+    appendMessage({ role: "user", content: interruptMsg }, roundCount);
+  }
+}
+const finalMsgs = prepareMessages(roundCount);
 ```
 
 `tickRound()` 内部逻辑：
-- 如果没有 active list → 无操作
-- 如果没有 in_progress 的 task → 无操作
+- 如果没有 active list → 无操作，返回 null
+- 如果没有 in_progress 的 task → 无操作，返回 null
 - 否则 roundCount +1，检查是否超限
+- 达到上限时返回中断消息（作为 user 消息注入上下文），未超限返回 null
 
 ### Tool 注册
 
-在 `registry.ts` 中注册 6 个 todo tool，与 bash/files 工具完全一致的模式。
+在 `registry.ts` 中通过 `TodoToolProvider` 注册 6 个 todo tool，与 bash/files 工具完全一致的模式。
+
+工具执行函数的参数类型为 `Record<string, unknown>`（与 `ToolExecutor` 签名一致），`args["tasks"]` 经 `JSON.parse` 后实际为数组，无需类型断言。
 
 ## 运行流程示例
 

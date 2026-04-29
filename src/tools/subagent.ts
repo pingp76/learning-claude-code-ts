@@ -22,6 +22,7 @@ import type { LLMClient } from "../llm.js";
 import type { Logger } from "../logger.js";
 import type { Agent } from "../agent.js";
 import type { ContextCompressor } from "../compressor.js";
+import type { PermissionManager } from "../permission.js";
 import { createHistory } from "../history.js";
 import { SKILL_SYSTEM_PROMPT_HINT } from "../skills.js";
 
@@ -77,7 +78,7 @@ export const subagentToolDefinition: ChatCompletionTool = {
 export interface SubagentToolProvider {
   toolEntries: Array<{
     definition: ChatCompletionTool;
-    execute: (args: Record<string, string>) => Promise<ToolResult>;
+    execute: (args: Record<string, unknown>) => Promise<ToolResult>;
   }>;
 }
 
@@ -108,10 +109,14 @@ export function createSubagentToolProvider(deps: {
     maxRounds?: number;
     compressor: ContextCompressor;
     maxContextTokens?: number;
+    permissionManager: PermissionManager;
+    askUserFn?: import("../permission.js").AskUserFn;
   }) => Agent;
   createCompressorFn: () => ContextCompressor;
+  /** 权限管理器：子智能体继承父级的同一个实例 */
+  permissionManager: PermissionManager;
 }): SubagentToolProvider {
-  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn } = deps;
+  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager } = deps;
 
   /**
    * executeSubagent — 执行子智能体任务
@@ -126,9 +131,9 @@ export function createSubagentToolProvider(deps: {
    * @param args - LLM 传入的工具参数（task + 可选的 max_rounds）
    */
   async function executeSubagent(
-    args: Record<string, string>,
+    args: Record<string, unknown>,
   ): Promise<ToolResult> {
-    const task = args["task"] ?? "";
+    const task = String(args["task"] ?? "");
     // max_rounds 参数：默认 20 轮，父智能体可以通过参数覆盖
     const maxRounds = Number(args["max_rounds"]) || 20;
 
@@ -158,6 +163,8 @@ export function createSubagentToolProvider(deps: {
       //    - 不传 todoManager（子智能体不做任务管理）
       //    - 设置 maxRounds（硬性轮数上限）
       //    - 使用独立的压缩器实例（隔离压缩状态）
+      //    - 共享同一个 permissionManager（继承父级权限模式）
+      //    - 不传 askUserFn（子智能体内的 ask 降级为 deny）
       const subCompressor = createCompressorFn();
       const subAgent = createAgentFn({
         llm,
@@ -166,6 +173,8 @@ export function createSubagentToolProvider(deps: {
         logger,
         maxRounds,
         compressor: subCompressor,
+        permissionManager,
+        // 不传 askUserFn：子智能体内的 ask 决策降级为 deny
       });
 
       // 4. 运行子 Agent（父智能体在此阻塞等待）

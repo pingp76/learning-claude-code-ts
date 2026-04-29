@@ -1,32 +1,72 @@
 /**
  * history.ts — 对话历史管理模块
  *
- * 职责：管理与 LLM 的对话上下文（消息历史）。
+ * 职责：管理与 LLM 的对话上下文（消息历史）及消息元信息（如轮次号）。
  *
  * 为什么需要对话历史？
  * - LLM 是无状态的：每次调用 API 时，需要把之前的对话全部发过去
  * - Agent 循环中会产生多轮对话（用户提问 → 模型回答 → 调用工具 → 工具结果 → 模型再回答）
  * - 所有这些消息都需要按顺序保存，下一次调用 API 时作为上下文传入
  *
+ * 为什么把 round 元信息存在 history 里？
+ * - 之前 agent.ts 维护了一个与 messages 平行的 messageRounds 数组
+ * - 任何绕过 appendMessage() 直接调用 history.add() 的地方都会破坏对齐
+ * - 把 round 收归 history 统一管理后，add() 是唯一的写入路径，不可能失同步
+ * - 同时消除了 annotateWithRounds() 中的 system prompt 偏移计算
+ *
  * 设计模式：工厂函数 + 闭包（与 logger.ts 相同的模式）
- * - messages 数组被闭包捕获，外部无法直接修改
- * - 只通过 add/getMessages/clear 三个方法操作，保证数据一致性
+ * - messages 和 rounds 数组被闭包捕获，外部无法直接修改
+ * - 通过五个方法操作，保证数据一致性
  */
 
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 /**
+ * HistoryEntry — 带元信息的消息条目
+ *
+ * 用于压缩管道（prepareMessages → groupToBlocks）读取 round 等元数据。
+ * 对外暴露的结构化视图，不暴露内部存储细节。
+ */
+export interface HistoryEntry {
+  /** 原始消息 */
+  message: ChatCompletionMessageParam;
+  /** 消息所属的 agent loop 轮次（用户消息为 0，之后每轮递增） */
+  round?: number;
+}
+
+/**
  * History — 对话历史管理接口
  *
- * 四个核心操作：
- * - add：添加一条消息（可能是用户消息、模型回复、工具结果等）
- * - getMessages：获取所有消息的副本（用于传给 LLM API）
- * - clear：清空历史（开始新的对话）
- * - setSystemPrompt：设置 system prompt（自动插入到消息列表头部）
+ * 五个核心操作：
+ * - add：添加一条消息，可附带元信息（如轮次号）
+ * - getMessages：获取纯消息列表的副本（含 system prompt 在头部），用于 LLM API 调用
+ * - getEntries：获取带元信息的条目列表（不含 system prompt），用于压缩管道
+ * - clear：清空所有消息和元信息
+ * - setSystemPrompt / getSystemPrompt：设置/获取 system prompt
  */
 export interface History {
-  add(message: ChatCompletionMessageParam): void;
+  /**
+   * 添加一条消息到历史末尾。
+   *
+   * @param message - 消息（可能是用户消息、模型回复、工具结果等）
+   * @param meta - 可选的元信息（如轮次号），向后兼容
+   */
+  add(message: ChatCompletionMessageParam, meta?: { round?: number }): void;
+  /**
+   * 获取纯消息列表的浅拷贝（含 system prompt 在头部）。
+   * 用于传给 LLM API — 不含任何内部元数据。
+   */
   getMessages(): ChatCompletionMessageParam[];
+  /**
+   * 获取带元信息的条目列表（不含 system prompt）。
+   * 用于压缩管道：prepareMessages() 需要读取 round 来做衰减压缩。
+   *
+   * 为什么不含 system prompt？
+   * - system prompt 不参与压缩管道（groupToBlocks 会跳过 system 消息）
+   * - 调用方可通过 getSystemPrompt() 单独获取
+   */
+  getEntries(): HistoryEntry[];
+  /** 清空所有消息和元信息 */
   clear(): void;
   /**
    * 设置 system prompt，会在 getMessages() 时自动插入到消息列表头部。
@@ -37,6 +77,8 @@ export interface History {
    * - 独立存储，getMessages() 时拼接到头部，更干净
    */
   setSystemPrompt(prompt: string): void;
+  /** 获取当前 system prompt（未设置时返回 null） */
+  getSystemPrompt(): string | null;
 }
 
 /**
@@ -44,25 +86,33 @@ export interface History {
  *
  * @returns History 接口的实现
  *
- * 内部使用一个数组来存储消息。每次调用 getMessages() 时返回数组的浅拷贝，
- * 这样外部即使修改了返回的数组，也不会影响内部存储。
+ * 内部使用两个平行数组存储消息和元信息：
+ * - messages: 消息数组
+ * - rounds: 轮次数组（与 messages 一一对应）
+ *
+ * 这两个数组封装在闭包内，外部只能通过接口方法访问，
+ * 因此不可能出现失同步的情况（之前 agent.ts 的 messageRounds 就有这个风险）。
  */
 export function createHistory(): History {
   // 消息数组，按时间顺序存储所有对话消息
-  // 每条消息包含 role（角色）和 content（内容）等字段
   const messages: ChatCompletionMessageParam[] = [];
+
+  // 轮次数组，与 messages 一一对应
+  // 存储 add() 时传入的 round 元信息
+  const rounds: (number | undefined)[] = [];
 
   // system prompt 独立存储，不放入 messages 数组
   // 这样它不会干扰消息标准化逻辑（合并、补全 tool_result 等）
   let systemPrompt: string | null = null;
 
   return {
-    // 添加一条消息到历史末尾
-    add(message) {
+    // 添加一条消息到历史末尾，同时记录 round 元信息
+    add(message, meta) {
       messages.push(message);
+      rounds.push(meta?.round);
     },
 
-    // 返回消息数组的浅拷贝
+    // 返回消息数组的浅拷贝（纯消息，不含元数据）
     // 如果设置了 system prompt，自动在头部插入 system 消息
     getMessages() {
       const result = [...messages];
@@ -75,16 +125,33 @@ export function createHistory(): History {
       return result;
     },
 
-    // 清空所有消息
+    // 返回带 round 元信息的条目列表（不含 system prompt）
+    // 供压缩管道使用：prepareMessages() 通过此方法获取 round 信息
+    getEntries() {
+      return messages.map((msg, i) => {
+        const entry: HistoryEntry = { message: msg };
+        if (rounds[i] !== undefined) {
+          entry.round = rounds[i];
+        }
+        return entry;
+      });
+    },
+
+    // 清空所有消息和元信息
     // length = 0 是清空数组的高效方式，不会创建新数组
     clear() {
       messages.length = 0;
+      rounds.length = 0;
     },
 
     // 设置 system prompt
-    // 设置后，每次 getMessages() 都会在头部自动插入此 prompt
     setSystemPrompt(prompt: string): void {
       systemPrompt = prompt;
+    },
+
+    // 获取当前 system prompt
+    getSystemPrompt(): string | null {
+      return systemPrompt;
     },
   };
 }

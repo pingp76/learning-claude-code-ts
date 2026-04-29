@@ -152,7 +152,7 @@ describe("decayOldBlocks (P0)", () => {
 
     // P1: 即时压缩，存文件并注册到 persistedToolOutputs
     const longOutput = "a".repeat(1000);
-    comp.compressToolResult(tcId, longOutput);
+    comp.compressToolResult("run_bash", tcId, longOutput);
 
     // 构造包含该 toolCallId 的 tool_use 块
     const block = makeToolUseBlock("run_bash", '{"command":"ls"}', longOutput, 1, tcId);
@@ -226,8 +226,17 @@ describe("compressToolResult (P1)", () => {
 
   it("passes through small output unchanged", () => {
     const compressor = createContextCompressor({ thresholdToolOutput: 2000 });
-    const result = compressor.compressToolResult("tc1", "small output");
+    const result = compressor.compressToolResult("run_bash", "tc1", "small output");
     expect(result.content).toBe("small output");
+    expect(result.persistedPath).toBeUndefined();
+  });
+
+  it("passes through output from non-compressible tools", () => {
+    const compressor = createContextCompressor({ thresholdToolOutput: 50 });
+    const largeOutput = "x".repeat(500);
+    // run_read 不在 compressibleTools 列表中，即使输出很大也不压缩
+    const result = compressor.compressToolResult("run_read", "tc_nocomp", largeOutput);
+    expect(result.content).toBe(largeOutput);
     expect(result.persistedPath).toBeUndefined();
   });
 
@@ -235,7 +244,7 @@ describe("compressToolResult (P1)", () => {
     const compressor = createContextCompressor({ thresholdToolOutput: 100 });
     // 生成超过 100 token 的输出（100 / 0.25 = 400 字符）
     const largeOutput = "a".repeat(1000);
-    const result = compressor.compressToolResult("tc_test_large", largeOutput);
+    const result = compressor.compressToolResult("run_bash", "tc_test_large", largeOutput);
 
     // 内容应该包含 persisted-output 标记，且嵌入 toolCallId
     expect(result.content).toContain(`<persisted-output tool-call-id="tc_test_large">`);
@@ -249,7 +258,7 @@ describe("compressToolResult (P1)", () => {
   it("preview is shorter than original output", () => {
     const compressor = createContextCompressor({ thresholdToolOutput: 100 });
     const largeOutput = "hello world ".repeat(200);
-    const result = compressor.compressToolResult("tc_preview_test", largeOutput);
+    const result = compressor.compressToolResult("run_bash", "tc_preview_test", largeOutput);
 
     expect(result.content.length).toBeLessThan(largeOutput.length);
   });
@@ -376,7 +385,7 @@ describe("cleanup", () => {
   it("removes .task_outputs directory", () => {
     const compressor = createContextCompressor({ thresholdToolOutput: 50 });
     // 触发一次文件写入
-    compressor.compressToolResult("tc_cleanup", "x".repeat(500));
+    compressor.compressToolResult("run_bash", "tc_cleanup", "x".repeat(500));
     expect(existsSync(outputDir)).toBe(true);
 
     compressor.cleanup();
