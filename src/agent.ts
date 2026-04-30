@@ -36,6 +36,8 @@ import type { ToolRegistry } from "./tools/registry.js";
 import type { TodoManager } from "./todo.js";
 import type { ContextCompressor } from "./compressor.js";
 import type { PermissionManager, AskUserFn } from "./permission.js";
+import type { HookRunner } from "./hooks.js";
+import { createNoopHookRunner } from "./hooks.js";
 import { normalizeMessages } from "./normalize.js";
 import {
   groupToBlocks,
@@ -83,6 +85,8 @@ export function createAgent(deps: {
   permissionManager: PermissionManager;
   /** 用户确认回调（可选，子智能体不传，ask 决策降级为 deny） */
   askUserFn?: AskUserFn;
+  /** Hook 运行器（可选，不传时使用空操作 runner，不触发任何 Hook） */
+  hookRunner?: HookRunner;
 }): Agent {
   const {
     llm,
@@ -95,7 +99,14 @@ export function createAgent(deps: {
     maxContextTokens = 80000,
     permissionManager,
     askUserFn,
+    hookRunner,
   } = deps;
+
+  // 没有传入 hookRunner 时使用空操作实现，避免所有调用处都要做 if 判断
+  const hooks = hookRunner ?? createNoopHookRunner();
+
+  // SessionStart 标记：每个 Agent 实例只在第一次 run() 时触发一次
+  let sessionStarted = false;
 
   // =====================================================================
   // 内部步骤函数
@@ -239,6 +250,11 @@ export function createAgent(deps: {
     toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[],
     roundCount: number,
   ): Promise<void> {
+    // 延迟注入缓冲区：Hook 的 exitCode 2 消息不能在 tool_result 之间插入，
+    // 否则会破坏 OpenAI API 的 tool_call / tool_result 配对规则。
+    // 所有待注入消息在当前 assistant 的所有 tool_result 写完后统一追加。
+    const pendingHookMessages: string[] = [];
+
     for (const toolCall of toolCalls) {
       const fnName = toolCall.function.name;
       const executor = tools.getExecutor(fnName);
@@ -333,6 +349,39 @@ export function createAgent(deps: {
         }
       }
 
+      // PreToolUse Hook：权限检查通过后、工具真正执行前触发
+      // 这里 Hook 看到的是"已经被系统允许、即将执行"的工具调用
+      const preResult = await hooks.run({
+        name: "PreToolUse",
+        payload: {
+          toolCallId: toolCall.id,
+          toolName: fnName,
+          args,
+          round: roundCount,
+        },
+      });
+
+      if (preResult.exitCode === 1) {
+        // exitCode 1：阻止工具执行
+        // 必须写入一条 role: "tool" 消息来满足 tool_call 配对
+        logger.info("PreToolUse hook blocked: %s — %s", fnName, preResult.message ?? "no reason");
+        appendMessage(
+          {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: `Blocked by PreToolUse hook: ${preResult.message ?? "no reason"}`,
+          } as ChatCompletionMessageParam,
+          roundCount,
+        );
+        continue;
+      }
+
+      // exitCode 2：记录待注入消息，工具照常执行
+      // 消息在所有 tool_result 写完后统一追加，避免破坏消息格式
+      if (preResult.exitCode === 2 && preResult.message) {
+        pendingHookMessages.push(`[Hook: PreToolUse]\n${preResult.message}`);
+      }
+
       // 执行工具
       const result = await executor(args);
 
@@ -359,6 +408,43 @@ export function createAgent(deps: {
         } as ChatCompletionMessageParam,
         roundCount,
       );
+
+      // PostToolUse Hook：工具执行、P1 压缩、tool_result 写入后触发
+      // payload.output 是"已经经过 P1 即时压缩后的内容"
+      const postResult = await hooks.run({
+        name: "PostToolUse",
+        payload: {
+          toolCallId: toolCall.id,
+          toolName: fnName,
+          args,
+          round: roundCount,
+          output: toolOutput,
+          error: result.error,
+        },
+      });
+
+      // PostToolUse 的 exitCode 1：工具已经执行，不能撤销
+      // 将其解释为"阻止后续静默继续"，注入警告提醒让模型知道
+      if (postResult.exitCode === 1) {
+        pendingHookMessages.push(
+          `[Hook: PostToolUse]\nPostToolUse requested block after tool execution: ${
+            postResult.message ?? "no reason"
+          }`,
+        );
+      }
+
+      // exitCode 2：注入补充观察或提醒
+      if (postResult.exitCode === 2 && postResult.message) {
+        pendingHookMessages.push(`[Hook: PostToolUse]\n${postResult.message}`);
+      }
+    }
+
+    // 延迟注入：所有 tool_result 写完后，统一追加 Hook 补充消息为 user 消息
+    // 这样保证：(1) 每个 tool_call 都有对应 tool_result
+    //         (2) Hook 补充内容能被下一轮 LLM 看到
+    //         (3) 多工具调用时，不会在 tool_result 之间插入 user 消息
+    for (const msg of pendingHookMessages) {
+      appendMessage({ role: "user", content: msg }, roundCount);
     }
   }
 
@@ -414,8 +500,40 @@ export function createAgent(deps: {
     async run(query) {
       logger.info("User query: %s", query);
 
-      // 将用户消息加入对话历史（轮次为 0，即用户输入轮次）
-      appendMessage({ role: "user", content: query }, 0);
+      // SessionStart Hook：在用户消息写入之前触发
+      // 必须在 appendMessage 之前，否则 block 时 user 消息已经写入 history，
+      // 下次 run() 不再触发 SessionStart，被阻止的 query 反而会进入 LLM 上下文。
+      if (!sessionStarted) {
+        sessionStarted = true;
+        const sessionResult = await hooks.run({
+          name: "SessionStart",
+          payload: { query },
+        });
+
+        // exitCode 1：阻止会话（如安全策略不允许），直接返回，不写入 history
+        if (sessionResult.exitCode === 1) {
+          return sessionResult.message ?? "Session blocked by hook.";
+        }
+
+        // exitCode 2：注入补充提示，在用户消息之后作为 user 消息追加到历史
+        if (sessionResult.exitCode === 2 && sessionResult.message) {
+          // 先写入用户消息，再写入 Hook 补充消息
+          appendMessage({ role: "user", content: query }, 0);
+          appendMessage(
+            {
+              role: "user",
+              content: `[Hook: SessionStart]\n${sessionResult.message}`,
+            },
+            0,
+          );
+        } else {
+          // exitCode 0：正常写入用户消息
+          appendMessage({ role: "user", content: query }, 0);
+        }
+      } else {
+        // 后续 run() 调用：直接写入用户消息
+        appendMessage({ role: "user", content: query }, 0);
+      }
 
       // Agent 主循环：不断调用 LLM，直到它不再请求工具调用
       let roundCount = 0;

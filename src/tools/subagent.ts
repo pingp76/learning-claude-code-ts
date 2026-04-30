@@ -23,6 +23,7 @@ import type { Logger } from "../logger.js";
 import type { Agent } from "../agent.js";
 import type { ContextCompressor } from "../compressor.js";
 import type { PermissionManager } from "../permission.js";
+import type { HookRunner } from "../hooks.js";
 import { createHistory } from "../history.js";
 import { SKILL_SYSTEM_PROMPT_HINT } from "../skills.js";
 
@@ -111,12 +112,16 @@ export function createSubagentToolProvider(deps: {
     maxContextTokens?: number;
     permissionManager: PermissionManager;
     askUserFn?: import("../permission.js").AskUserFn;
+    /** Hook 运行器：子智能体继承父级 Hook */
+    hookRunner?: HookRunner;
   }) => Agent;
   createCompressorFn: () => ContextCompressor;
   /** 权限管理器：子智能体继承父级的同一个实例 */
   permissionManager: PermissionManager;
+  /** Hook 运行器：子智能体继承父级 Hook，工具执行前后可观察 */
+  hookRunner?: HookRunner;
 }): SubagentToolProvider {
-  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager } = deps;
+  const { llm, logger, createFilteredRegistry, createAgentFn, createCompressorFn, permissionManager, hookRunner } = deps;
 
   /**
    * executeSubagent — 执行子智能体任务
@@ -166,7 +171,9 @@ export function createSubagentToolProvider(deps: {
       //    - 共享同一个 permissionManager（继承父级权限模式）
       //    - 不传 askUserFn（子智能体内的 ask 降级为 deny）
       const subCompressor = createCompressorFn();
-      const subAgent = createAgentFn({
+      // 子智能体创建参数：只有 hookRunner 有值时才传入
+      // exactOptionalPropertyTypes 不允许显式传 undefined 给可选属性
+      const subAgentDeps: Parameters<typeof createAgentFn>[0] = {
         llm,
         history: subHistory,
         tools: subTools,
@@ -175,7 +182,11 @@ export function createSubagentToolProvider(deps: {
         compressor: subCompressor,
         permissionManager,
         // 不传 askUserFn：子智能体内的 ask 决策降级为 deny
-      });
+      };
+      if (hookRunner) {
+        subAgentDeps.hookRunner = hookRunner;
+      }
+      const subAgent = createAgentFn(subAgentDeps);
 
       // 4. 运行子 Agent（父智能体在此阻塞等待）
       const result = await subAgent.run(task);

@@ -38,6 +38,7 @@ import {
 } from "./cli-commands.js";
 import { createTerminal } from "./terminal.js";
 import { createPermissionManager } from "./permission.js";
+import { createHookRunner } from "./hooks.js";
 
 /**
  * main — 主函数
@@ -80,8 +81,59 @@ async function main() {
   // 9. 创建 skill 工具提供者
   const skillProvider = createSkillToolProvider(skillManager);
 
-  // 10. 创建子智能体工具提供者
+  // 10. 创建 Hook Runner（注册三个教学演示 handler，仅打印日志不修改对话）
+  //     父子 Agent 共享同一个实例，确保子智能体继承父级 Hook
+  const hookRunner = createHookRunner(
+    {
+      // SessionStart：会话开始时记录用户输入
+      SessionStart: [
+        (event) => {
+          if (event.name === "SessionStart") {
+            logger.info(
+              "[Hook:SessionStart] 会话开始，用户输入: %s",
+              event.payload.query.slice(0, 80),
+            );
+          }
+          return { exitCode: 0 };
+        },
+      ],
+      // PreToolUse：工具执行前记录工具名和参数摘要
+      PreToolUse: [
+        (event) => {
+          if (event.name === "PreToolUse") {
+            const { toolName, args } = event.payload;
+            const argsPreview = JSON.stringify(args).slice(0, 120);
+            logger.info(
+              "[Hook:PreToolUse] 即将执行 %s，参数: %s",
+              toolName,
+              argsPreview,
+            );
+          }
+          return { exitCode: 0 };
+        },
+      ],
+      // PostToolUse：工具执行后记录结果摘要
+      PostToolUse: [
+        (event) => {
+          if (event.name === "PostToolUse") {
+            const { toolName, error, output } = event.payload;
+            logger.info(
+              "[Hook:PostToolUse] %s 执行完毕 (%s)，输出: %s",
+              toolName,
+              error ? "失败" : "成功",
+              output.slice(0, 120),
+            );
+          }
+          return { exitCode: 0 };
+        },
+      ],
+    },
+    logger,
+  );
+
+  // 11. 创建子智能体工具提供者
   //     注入 permissionManager（子智能体继承同一权限模式）
+  //     注入 hookRunner（子智能体继承父级 Hook，工具执行前后可观察）
   const subagentProvider = createSubagentToolProvider({
     llm,
     logger,
@@ -90,24 +142,25 @@ async function main() {
     createAgentFn: createAgent,
     createCompressorFn: () => createContextCompressor(config.compression),
     permissionManager,
+    hookRunner,
   });
 
-  // 11. 创建工具注册表
+  // 12. 创建工具注册表
   const tools = createToolRegistry(
     todoManager,
     subagentProvider,
     skillProvider,
   );
 
-  // 12. 设置 system prompt（有 skill 时才注入）
+  // 13. 设置 system prompt（有 skill 时才注入）
   if (skillManager.listMeta().length > 0) {
     history.setSystemPrompt(SKILL_SYSTEM_PROMPT_HINT);
   }
 
-  // 13. 创建上下文压缩器
+  // 14. 创建上下文压缩器
   const compressor = createContextCompressor(config.compression);
 
-  // 14. 创建 Agent（注入权限管理器和确认回调）
+  // 15. 创建 Agent（注入权限管理器、确认回调和 Hook Runner）
   const agent = createAgent({
     llm,
     history,
@@ -118,6 +171,7 @@ async function main() {
     maxContextTokens: config.compression.maxContextTokens,
     permissionManager,
     askUserFn: terminal.askUser.bind(terminal),
+    hookRunner,
   });
 
   // 15. 注册 CLI 命令

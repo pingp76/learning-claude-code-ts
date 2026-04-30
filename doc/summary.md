@@ -10,7 +10,7 @@ GitHub: https://github.com/pingp76/learning-claude-code-ts
 
 ## 当前状态
 
-**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理
+**已完成阶段**: 基础 REPL + LLM 对话 + bash 工具调用 + 文件操作工具 + 消息标准化 + TODO 任务管理 + 子智能体（SubAgent）+ Skill（技能）系统 + LLM 通信日志 + 上下文压缩 + 权限管理 + Hook 机制
 
 ## 源码结构
 
@@ -31,11 +31,14 @@ src/
 ├── todo.ts             # TODO 管理器：session 级别任务列表（工厂函数 + 6 个工具）
 ├── skills.ts           # Skill 管理器：按需加载的 prompt 扩展（scan/invoke/remove）+ SkillToolProvider
 ├── permission.ts       # 权限管理器：三种模式（plan/auto/default）+ 黑白名单 + 路径边界 + ask 降级
+├── hooks.ts            # Hook 系统：轻量进程内 Hook（SessionStart / PreToolUse / PostToolUse）+ HookRunner 工厂
 ├── terminal.ts         # 终端输入输出封装：共享 readline（REPL + 权限确认共用）
 ├── debug-e2e.ts        # 端到端调试脚本（Skill+TODO+SubAgent 协作验证）
 ├── message-block.test.ts # 消息块测试（24 个测试用例）
 ├── compressor.test.ts    # 压缩器测试（21 个测试用例）
 ├── permission.test.ts   # 权限管理器测试（39 个测试用例）
+├── hooks.test.ts        # Hook Runner 单元测试（11 个测试用例）
+├── agent.test.ts        # Agent Hook 集成测试（6 个测试用例）
 ├── todo.test.ts        # TODO 管理器测试（33 个测试用例）
 ├── skills.test.ts      # Skill 管理器测试（25 个测试用例）
 ├── normalize.test.ts   # 消息标准化测试
@@ -67,7 +70,7 @@ skills/
   - `appendMessage()`：向 history 添加消息（round 元信息由 history 统一管理）
   - `annotateEntries()`：将 HistoryEntry[] 转换为带 `_round` 的消息列表（替代原 annotateWithRounds）
   - `prepareMessages(roundCount)`：消息处理管道（getEntries → annotate → normalize → group → decay → [compact] → flatten），含降级容错
-  - `handleToolCalls(toolCalls, roundCount)`：工具调用循环（解析参数 → 执行 → P1 压缩 → 回写历史）
+  - `handleToolCalls(toolCalls, roundCount)`：工具调用循环（解析参数 → 权限检查 → PreToolUse Hook → 执行 → P1 压缩 → 回写历史 → PostToolUse Hook → 延迟注入补充消息）
   - `buildRoundLimitResponse(roundCount)`：子智能体轮次上限检测与截断响应
 - **轮次追踪**：round 元信息存储在 history 内部（`HistoryEntry`），agent 不再维护平行数组
 - **P1 即时压缩**：run_bash 工具的大输出自动存文件，只返回 preview
@@ -180,6 +183,17 @@ skills/
 - **子智能体继承**：共享同一个 `PermissionManager` 实例，不传 `askUserFn`（ask 降级为 deny）
 - **`/mode` CLI 命令**：通过 `cli-commands.ts` 注册，切换运行模式
 
+### Hook 机制 (`hooks.ts`)
+- **轻量进程内 Hook 系统**：在 Agent 主流程的固定时机发出事件，让外部逻辑观察或干预
+- **三种事件**：SessionStart（会话开始）、PreToolUse（工具执行前）、PostToolUse（工具执行后）
+- **三种返回语义**：exitCode 0（继续）、1（阻止）、2（注入补充消息后继续）
+- **延迟注入规则**：exitCode 2 的消息在所有 tool_result 写完后统一追加为 user 消息，避免破坏 tool_call/tool_result 配对
+- **HookRunner 串行执行**：同一事件多个 handler 按注册顺序执行，block 短路，inject 消息累积
+- **异常容错**：handler 抛异常只记录 warn，不影响主流程
+- **Agent 集成**：hookRunner 通过依赖注入传入，不传时使用 noop runner
+- **子智能体继承**：子智能体共享父级 hookRunner 实例
+- **PreToolUse 在权限检查之后触发**：Hook 不负责安全逻辑，权限系统仍然是独立的安全门卫
+
 ### 终端封装 (`terminal.ts`)
 - **统一 readline 接口**：REPL 读取和权限确认共享同一个 `readline.Interface`
 - `question(prompt)`：用于 REPL 输入
@@ -238,6 +252,8 @@ skills/
 | `src/message-block.test.ts` | 24 | 消息块分组、还原、_round 传递与清除、round-trip 一致性、token 估算 |
 | `src/compressor.test.ts` | 21 | 衰减压缩、即时压缩（含非压缩工具通过）、全量压缩、状态管理、cleanup |
 | `src/permission.test.ts` | 39 | 模式管理、bash 黑名单、路径黑名单、路径越界、白名单、plan/auto/default 模式决策、子智能体继承 |
+| `src/hooks.test.ts` | 11 | HookRunner 串行执行、block 短路、inject 累积、异常容错、noop runner |
+| `src/agent.test.ts` | 6 | SessionStart 注入/单次触发、PreToolUse 阻止/注入、PostToolUse 注入、多 tool call 消息顺序 |
 | `src/index.test.ts` | 1 | 占位 |
 
 ## 设计模式
@@ -249,6 +265,8 @@ skills/
 - **命名规范**：所有工具名以 `run_` 前缀、全小写
 - **元信息内聚**：round 等消息元信息由 history 统一管理，消除外部平行数组
 - **统一门卫模式**：权限层在 Agent 循环中、工具执行前统一拦截，复用工具内部的安全检查函数
+- **Hook 扩展点**：Agent 主流程在固定时机发出事件（SessionStart/PreToolUse/PostToolUse），Hook 负责外部扩展逻辑，不替代权限管理
+- **延迟注入**：Hook 的 exitCode 2 消息在所有 tool_result 写完后统一追加为 user 消息，避免破坏 tool_call/tool_result 配对
 - **权限继承**：子智能体共享父级 PermissionManager 实例，ask 决策因无回调降级为 deny
 - **终端共享**：REPL 和权限确认通过 Terminal 共享同一个 readline 实例，避免 stdin 冲突
 
